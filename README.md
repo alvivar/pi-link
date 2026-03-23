@@ -49,12 +49,6 @@ A single Pi terminal is powerful. Multiple terminals working together unlock new
 pi install npm:pi-link
 ```
 
-or from source:
-
-```bash
-pi install https://github.com/alvivar/pi-link
-```
-
 ### Uninstall
 
 ```bash
