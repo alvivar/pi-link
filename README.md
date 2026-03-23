@@ -1,8 +1,8 @@
-# pi-mesh
+# pi-link
 
 A WebSocket-based inter-terminal communication system that creates a local network between multiple Pi coding agent terminals. Enables terminals to discover each other, exchange messages, and orchestrate work across agents — all automatically on `localhost`.
 
-> Self-contained TypeScript in a single `index.ts` file. Start Pi with `--mesh` to enable.
+> Self-contained TypeScript in a single `index.ts` file. Start Pi with `--link` to enable.
 
 ---
 
@@ -29,7 +29,7 @@ A single Pi terminal is powerful. Multiple terminals working together unlock new
 
 - **Research + Build** — one terminal investigates APIs, docs, or logs while another writes code based on the findings.
 - **Fan-out** — split a large task across agents (e.g., "terminal A handles the backend, terminal B handles the frontend") and collect results.
-- **Orchestrator / Worker** — designate one terminal as a coordinator that delegates subtasks to others via `mesh_prompt` and assembles the final output.
+- **Orchestrator / Worker** — designate one terminal as a coordinator that delegates subtasks to others via `link_prompt` and assembles the final output.
 - **Review pipeline** — one terminal writes code, another reviews it, back and forth until both are satisfied.
 
 ---
@@ -46,50 +46,56 @@ A single Pi terminal is powerful. Multiple terminals working together unlock new
 ### Install
 
 ```bash
-pi install git:github.com/alvivar/pi-mesh
+pi install npm:pi-link
+```
+
+or from source:
+
+```bash
+pi install https://github.com/alvivar/pi-link
 ```
 
 ### Uninstall
 
 ```bash
-pi uninstall git:github.com/alvivar/pi-mesh
+pi uninstall npm:pi-link
 ```
 
 ### Usage
 
-Mesh is **off by default**. Start Pi with the `--mesh` flag to auto-connect on startup:
+Link is **off by default**. Start Pi with the `--link` flag to auto-connect on startup:
 
 ```
 Terminal 1                            Terminal 2
 ----------                            ----------
-$ pi --mesh                           $ pi --mesh
-✓ Mesh hub on :9900 as "t-a1b2"      ✓ Joined mesh as "t-c3d4" (2 online)
+$ pi --link                           $ pi --link
+✓ Link hub on :9900 as "t-a1b2"      ✓ Joined link as "t-c3d4" (2 online)
 ```
 
-Already in a session without `--mesh`? You can connect mid-session with `/mesh-connect`.
+Already in a session without `--link`? You can connect mid-session with `/link-connect`.
 
-Use `/mesh` in any terminal to check status, or let the LLM tools handle cross-terminal coordination.
+Use `/link` in any terminal to check status, or let the LLM tools handle cross-terminal coordination.
 
 ---
 
 ## Walkthrough
 
-Here's a concrete example of two terminals collaborating. Open two separate `pi --mesh` sessions.
+Here's a concrete example of two terminals collaborating. Open two separate `pi --link` sessions.
 
 **Terminal 1** — rename and check status:
 
 ```
-> /mesh-name builder
+> /link-name builder
 ✓ Renamed to "builder"
 
-> /mesh
-⚡ Mesh: "builder" (hub) · 2 terminals online: builder, researcher
+> /link
+⚡ Link: "builder" (hub) · 2 terminals online: builder, researcher
 ```
 
 **Terminal 2** — rename it too:
 
 ```
-> /mesh-name researcher
+> /link-name researcher
 ✓ Reconnecting as "researcher" (hub may assign a different name if taken)...
 ```
 
@@ -98,15 +104,15 @@ Here's a concrete example of two terminals collaborating. Open two separate `pi 
 In Terminal 1, type a normal prompt:
 
 ```
-> Use mesh_prompt to ask "researcher" to summarize the contents of README.md in this directory
+> Use link_prompt to ask "researcher" to summarize the contents of README.md in this directory
 ```
 
-The LLM in Terminal 1 calls `mesh_prompt` → Terminal 2's LLM receives the prompt, reads the file, and sends back a summary → Terminal 1's LLM presents the result to you.
+The LLM in Terminal 1 calls `link_prompt` → Terminal 2's LLM receives the prompt, reads the file, and sends back a summary → Terminal 1's LLM presents the result to you.
 
 **Or broadcast a message to all terminals:**
 
 ```
-> /mesh-broadcast starting the deployment pipeline
+> /link-broadcast starting the deployment pipeline
 ✓ Broadcast sent
 ```
 
@@ -120,15 +126,15 @@ Every other terminal sees:
 
 ## Configuration
 
-Mesh is **off by default**. Without `--mesh`, the extension is completely silent — no status bar, no connections, no warnings.
+Link is **off by default**. Without `--link`, the extension is completely silent — no status bar, no connections, no warnings.
 
-| Method             | When                                | Auto-reconnect? |
-| ------------------ | ----------------------------------- | --- |
-| `pi --mesh`        | Auto-connect on startup             | Yes |
-| `/mesh-connect`    | Opt-in mid-session (no flag needed) | Yes |
-| `/mesh-disconnect` | Opt-out mid-session                 | Suppressed until `/mesh-connect` |
+| Method              | When                                | Auto-reconnect? |
+| ------------------- | ----------------------------------- | --- |
+| `pi --link`         | Auto-connect on startup             | Yes |
+| `/link-connect`     | Opt-in mid-session (no flag needed) | Yes |
+| `/link-disconnect`  | Opt-out mid-session                 | Suppressed until `/link-connect` |
 
-`/mesh-connect` enables full mesh participation regardless of whether `--mesh` was passed. `/mesh-disconnect` always wins — even over `--mesh` — until you explicitly `/mesh-connect` again.
+`/link-connect` enables full participation in Pi Link regardless of whether `--link` was passed. `/link-disconnect` always wins — even over `--link` — until you explicitly `/link-connect` again.
 
 Once connected, terminals discover each other on `127.0.0.1:9900`. See [Limitations](#limitations--design-decisions) for the hardcoded port.
 
@@ -140,15 +146,15 @@ The extension registers three tools that the LLM can invoke during agent runs.
 
 ### Which tool should I use?
 
-| Tool          | Behavior                                             | Returns                                  |
-| ------------- | ---------------------------------------------------- | ---------------------------------------- |
-| `mesh_send`   | Send a message; optionally trigger the remote LLM    | Send/delivery status only                |
-| `mesh_prompt` | Run a prompt on a remote terminal and wait for reply | The remote terminal's assistant response |
-| `mesh_list`   | List currently connected terminals                   | Terminal directory with roles            |
+| Tool           | Behavior                                             | Returns                                  |
+| -------------- | ---------------------------------------------------- | ---------------------------------------- |
+| `link_send`    | Send a message; optionally trigger the remote LLM    | Send/delivery status only                |
+| `link_prompt`  | Run a prompt on a remote terminal and wait for reply | The remote terminal's assistant response |
+| `link_list`    | List currently connected terminals                   | Terminal directory with roles            |
 
-**If you need the other terminal's answer back, use `mesh_prompt`.** Use `mesh_send` to notify or steer without waiting.
+**If you need the other terminal's answer back, use `link_prompt`.** Use `link_send` to notify or steer without waiting.
 
-### `mesh_send`
+### `link_send`
 
 Send a fire-and-forget chat message to a specific terminal or broadcast to all.
 
@@ -158,13 +164,13 @@ Send a fire-and-forget chat message to a specific terminal or broadcast to all.
 | `message`     | `string`  | Message content                                      |
 | `triggerTurn` | `boolean` | If `true`, the receiver's LLM responds automatically |
 
-When `triggerTurn` is enabled, the message is delivered via `pi.sendMessage` with `deliverAs: "steer"`, causing the remote agent to kick off an LLM turn. Note: `triggerTurn` does **not** cause the response to come back to the caller — use `mesh_prompt` for that.
+When `triggerTurn` is enabled, the message is delivered via `pi.sendMessage` with `deliverAs: "steer"`, causing the remote agent to kick off an LLM turn. Note: `triggerTurn` does **not** cause the response to come back to the caller — use `link_prompt` for that.
 
 > **Broadcast note:** Sending to `"*"` delivers to **all other terminals** — the sender is excluded.
 
 Pre-validates the target name against the local terminal list before sending, catching typos early. On the hub, delivery confirmation is authoritative. On clients, delivery is optimistic — the message is sent to the hub for routing.
 
-### `mesh_prompt`
+### `link_prompt`
 
 Send a prompt to a remote terminal and **wait** for the LLM's response (synchronous RPC pattern).
 
@@ -180,7 +186,7 @@ Send a prompt to a remote terminal and **wait** for the LLM's response (synchron
 - Targets **one terminal at a time** (no broadcast mode).
 - Only **one remote prompt** can execute at a time per target terminal. Concurrent requests are rejected with `"Terminal is busy"`.
 
-### `mesh_list`
+### `link_list`
 
 Lists all connected terminals with role info and self-identification. Takes no parameters.
 
@@ -197,38 +203,38 @@ Connected terminals:
 
 ## Slash Commands
 
-| Command                 | Purpose                                                                                                  |
-| ----------------------- | -------------------------------------------------------------------------------------------------------- |
-| `/mesh`                 | Show mesh status (name, role, online count)                                                              |
-| `/mesh-name [name]`     | Rename this terminal. With no argument, adopts the current Pi session name if available. Collision-safe. |
-| `/mesh-broadcast <msg>` | Broadcast a chat message to all other terminals                                                          |
-| `/mesh-connect`         | Connect to the mesh (works anytime, with or without `--mesh`)                                            |
-| `/mesh-disconnect`      | Disconnect from the mesh and suppress auto-reconnect (overrides `--mesh`)                                |
+| Command                  | Purpose                                                                                                   |
+| ------------------------ | --------------------------------------------------------------------------------------------------------- |
+| `/link`                  | Show link status (name, role, online count)                                                               |
+| `/link-name [name]`      | Rename this terminal. With no argument, adopts the current Pi session name if available. Collision-safe.  |
+| `/link-broadcast <msg>`  | Broadcast a chat message to all other terminals                                                           |
+| `/link-connect`          | Connect to Pi Link (works anytime, with or without `--link`)                                              |
+| `/link-disconnect`       | Disconnect from Pi Link and suppress auto-reconnect (overrides `--link`)                                  |
 
 ### Examples
 
 ```
-> /mesh
-⚡ Mesh: "builder" (hub) · 3 online: builder, worker-1, worker-2
+> /link
+⚡ Link: "builder" (hub) · 3 online: builder, worker-1, worker-2
 
-> /mesh-name orchestrator
+> /link-name orchestrator
 ✓ Renamed to "orchestrator"
 
-> /mesh-name
+> /link-name
 ✓ Renamed to "my-session"          (adopts Pi session name)
 
-> /mesh-broadcast starting the build pipeline
+> /link-broadcast starting the build pipeline
 ✓ Broadcast sent
 
-> /mesh-disconnect
-✓ Disconnected from mesh
+> /link-disconnect
+✓ Disconnected from Pi Link
 
-> /mesh-connect
-✓ Joined mesh as "orchestrator" (3 online)    ... or ...
-✓ Mesh hub started on :9900 as "orchestrator" ... if no hub exists
+> /link-connect
+✓ Joined Pi Link as "orchestrator" (3 online)    ... or ...
+✓ Pi Link hub started on :9900 as "orchestrator" ... if no hub exists
 ```
 
-See [Configuration](#configuration) for details on `--mesh`, `/mesh-connect`, and `/mesh-disconnect` behavior.
+See [Configuration](#configuration) for details on `--link`, `/link-connect`, and `/link-disconnect` behavior.
 
 ---
 
@@ -236,7 +242,7 @@ See [Configuration](#configuration) for details on `--mesh`, `/mesh-connect`, an
 
 ### Hub-Spoke Topology
 
-Despite the name "mesh," the actual topology is **hub-spoke (star)**:
+The network topology is **hub-spoke (star)**:
 
 ```
                        +-----------+
@@ -258,7 +264,7 @@ Despite the name "mesh," the actual topology is **hub-spoke (star)**:
 
 ### Auto-Discovery Protocol
 
-The discovery sequence runs on startup (with `--mesh`) or when `/mesh-connect` is used. See [Configuration](#configuration) for details.
+The discovery sequence runs on startup (with `--link`) or when `/link-connect` is used. See [Configuration](#configuration) for details.
 
 The sequence is a simple fallback:
 
@@ -282,7 +288,7 @@ If another process occupies port 9900, the terminal can't become the hub. It wil
 
 ### "Terminal is busy" rejections
 
-Each terminal can only execute **one remote prompt at a time**. If a `mesh_prompt` arrives while the agent is already running (either from a local user or another remote prompt), it's immediately rejected with `"Terminal is busy"`. There is no queuing. Solutions:
+Each terminal can only execute **one remote prompt at a time**. If a `link_prompt` arrives while the agent is already running (either from a local user or another remote prompt), it's immediately rejected with `"Terminal is busy"`. There is no queuing. Solutions:
 
 - Wait for the target terminal to finish its current task.
 - Spread prompts across multiple worker terminals.
@@ -290,9 +296,9 @@ Each terminal can only execute **one remote prompt at a time**. If a `mesh_promp
 
 ### Terminals don't see each other
 
-- Verify both terminals are on the same machine (the mesh only works on `127.0.0.1`).
-- Run `/mesh` in each terminal to check status.
-- Ensure port 9900 isn't blocked or occupied by a non-mesh process.
+- Verify both terminals are on the same machine (the link only works on `127.0.0.1`).
+- Run `/link` in each terminal to check status.
+- Ensure port 9900 isn't blocked or occupied by a non-link process.
 
 ### Hub promotion loses state
 
@@ -310,8 +316,8 @@ When the hub goes down and a client promotes itself, terminal names and in-fligh
 | 4   | **Single remote prompt per terminal**     | No queuing — immediate rejection if the target is busy. Keeps the model simple and avoids unbounded backlogs.                                                 |
 | 5   | **No message persistence**                | Purely ephemeral WebSocket frames. Messages are lost if the recipient is offline.                                                                             |
 | 6   | **Client rename triggers full reconnect** | Changing a client's name requires a new `register` message, so the client disconnects and reconnects. Hub renames are handled in-place with collision checks. |
-| 7   | **Single-machine / localhost-only**       | Mesh only binds to `127.0.0.1`; terminals on different machines cannot join.                                                                                  |
-| 8   | **Opt-in startup**                        | Mesh is off by default. Use `pi --mesh` or `/mesh-connect` to participate. See [Configuration](#configuration).                                               |
+| 7   | **Single-machine / localhost-only**       | Link only binds to `127.0.0.1`; terminals on different machines cannot join.                                                                                  |
+| 8   | **Opt-in startup**                        | Link is off by default. Use `pi --link` or `/link-connect` to participate. See [Configuration](#configuration).                                               |
 
 ---
 
@@ -333,7 +339,7 @@ When the hub goes down and a client promotes itself, terminal names and in-fligh
 
 | Package                         | Purpose                                          |
 | ------------------------------- | ------------------------------------------------ |
-| `@mariozechner/pi-coding-agent` | Pi SDK types (ExtensionAPI, ExtensionContext)    |
+| `@mariozechner/pi-coding-agent` | Pi SDK types (ExtensionAPI, ExtensionContext)     |
 | `@mariozechner/pi-tui`          | TUI Text widget for custom message rendering     |
 | `@sinclair/typebox`             | JSON Schema type definitions for tool parameters |
 
@@ -341,7 +347,7 @@ When the hub goes down and a client promotes itself, terminal names and in-fligh
 
 ```json
 {
-  "name": "pi-mesh",
+  "name": "pi-link",
   "private": true,
   "dependencies": {
     "ws": "^8.20.0"
@@ -380,7 +386,7 @@ The wire protocol consists of **8 message types**, all serialized as JSON over W
 
 ### Message Flow Examples
 
-**Joining the mesh:**
+**Joining the link:**
 
 ```
 Client                         Hub
@@ -431,7 +437,7 @@ Default names are random 4-character hex IDs: `t-a1b2`, `t-c3d4`, etc.
 
 **Rename guards:**
 
-- If you're already using the requested name, `/mesh-name` returns early (`"Already using..."`).
+- If you're already using the requested name, `/link-name` returns early (`"Already using..."`).
 - On the hub, renaming checks if the name is taken by another connected client before accepting the change.
 - On a client, the rename triggers a reconnect; the hub enforces uniqueness during re-registration and may assign a different name if taken.
 
@@ -439,13 +445,13 @@ Default names are random 4-character hex IDs: `t-a1b2`, `t-c3d4`, etc.
 
 ### State Management
 
-| State Field              | Type                                  | Purpose                                              |
-| ------------------------ | ------------------------------------- | ---------------------------------------------------- |
-| `role`                   | `"hub" \| "client" \| "disconnected"` | Current network role                                 |
-| `isAgentBusy`            | `boolean`                             | Prevents accepting remote prompts during agent runs  |
-| `manuallyDisconnected`   | `boolean`                             | Set by `/mesh-disconnect`; suppresses auto-reconnect |
-| `pendingRemotePrompt`    | `object \| null`                      | Tracks the single in-flight remote prompt execution  |
-| `pendingPromptResponses` | `Map`                                 | Outstanding prompt RPCs awaiting responses           |
+| State Field              | Type                                    | Purpose                                               |
+| ------------------------ | --------------------------------------- | ----------------------------------------------------- |
+| `role`                   | `"hub" \| "client" \| "disconnected"`   | Current network role                                  |
+| `isAgentBusy`            | `boolean`                               | Prevents accepting remote prompts during agent runs   |
+| `manuallyDisconnected`   | `boolean`                               | Set by `/link-disconnect`; suppresses auto-reconnect  |
+| `pendingRemotePrompt`    | `object \| null`                        | Tracks the single in-flight remote prompt execution   |
+| `pendingPromptResponses` | `Map`                                   | Outstanding prompt RPCs awaiting responses            |
 
 ### Message Routing & Error Handling
 
@@ -458,10 +464,10 @@ Default names are random 4-character hex IDs: `t-a1b2`, `t-c3d4`, etc.
 
 Internally, teardown is split into two functions:
 
-- **`disconnect()`** — closes sockets, clears connection state, resolves pending promises. Used by `/mesh-disconnect` and called internally by `cleanup()`.
+- **`disconnect()`** — closes sockets, clears connection state, resolves pending promises. Used by `/link-disconnect` and called internally by `cleanup()`.
 - **`cleanup()`** — calls `disconnect()` then marks the extension as disposed. Used on `session_shutdown`.
 
-The `manuallyDisconnected` flag distinguishes user-initiated disconnects (`/mesh-disconnect`) from connection loss. When set, `scheduleReconnect()` is suppressed — the terminal stays offline until `/mesh-connect` is explicitly called.
+The `manuallyDisconnected` flag distinguishes user-initiated disconnects (`/link-disconnect`) from connection loss. When set, `scheduleReconnect()` is suppressed — the terminal stays offline until `/link-connect` is explicitly called.
 
 ### Agent Lifecycle Integration
 
@@ -473,4 +479,4 @@ The extension hooks into Pi's agent lifecycle events:
 
 ### Rendering
 
-Incoming mesh chat messages render with a styled `⚡ [sender]` prefix using the theme's accent color. The mesh status text in Pi's footer uses `theme.fg("dim", ...)` to match Pi's standard footer styling.
+Incoming link chat messages render with a styled `⚡ [sender]` prefix using the theme's accent color. The link status text in Pi's footer uses `theme.fg("dim", ...)` to match Pi's standard footer styling.

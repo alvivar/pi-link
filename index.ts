@@ -1,20 +1,20 @@
 /**
- * Pi Mesh — WebSocket-based inter-terminal communication
+ * Pi Link — WebSocket-based inter-terminal communication
  *
- * Connects multiple Pi terminals over a local WebSocket mesh.
+ * Connects multiple Pi terminals over a local WebSocket link.
  * The first terminal becomes the hub (server); others join as clients.
  * If the hub exits, a surviving terminal promotes itself automatically.
  *
  * Features:
  *   - Auto-discovery: try to connect → fall back to becoming the hub
  *   - Named terminals with uniqueness enforcement
- *   - LLM tools: mesh_send (chat), mesh_prompt (remote prompt + response), mesh_list
- *   - Commands: /mesh, /mesh-name, /mesh-broadcast, /mesh-connect, /mesh-disconnect
- *   - Custom message renderer for incoming mesh messages
+ *   - LLM tools: link_send (chat), link_prompt (remote prompt + response), link_list
+ *   - Commands: /link, /link-name, /link-broadcast, /link-connect, /link-disconnect
+ *   - Custom message renderer for incoming link messages
  *   - Auto-reconnect with hub promotion on disconnect
  *
  * Install:
- *   cd ~/.pi/agent/extensions/pi-mesh && npm install
+ *   cd ~/.pi/agent/extensions/pi-link && npm install
  *
  * Then just start two or more `pi` terminals — they discover each other.
  */
@@ -83,7 +83,7 @@ interface ErrorMsg {
   message: string;
 }
 
-type MeshMessage =
+type LinkMessage =
   | RegisterMsg
   | WelcomeMsg
   | TerminalJoinedMsg
@@ -96,8 +96,8 @@ type MeshMessage =
 // ─── Extension ───────────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
-  pi.registerFlag("mesh", {
-    description: "Connect to mesh on startup",
+  pi.registerFlag("link", {
+    description: "Connect to link on startup",
     type: "boolean",
     default: false,
   });
@@ -143,9 +143,9 @@ export default function (pi: ExtensionAPI) {
     const count = connectedTerminals.length;
     const info =
       role === "disconnected"
-        ? "mesh: offline"
-        : `mesh: ${terminalName} (${role}) · ${count} terminal${count !== 1 ? "s" : ""}`;
-    ctx.ui.setStatus("mesh", theme.fg("dim", info));
+        ? "link: offline"
+        : `link: ${terminalName} (${role}) · ${count} terminal${count !== 1 ? "s" : ""}`;
+    ctx.ui.setStatus("link", theme.fg("dim", info));
   }
 
   function allTerminalNames(): Set<string> {
@@ -167,7 +167,7 @@ export default function (pi: ExtensionAPI) {
     return Array.from(allTerminalNames()).sort();
   }
 
-  function safeParse(data: string): MeshMessage | null {
+  function safeParse(data: string): LinkMessage | null {
     try {
       return JSON.parse(data);
     } catch {
@@ -178,7 +178,7 @@ export default function (pi: ExtensionAPI) {
   // ── Routing ──────────────────────────────────────────────────────────────
 
   /** Hub: broadcast a message to every terminal except `excludeName`. */
-  function hubBroadcast(msg: MeshMessage, excludeName?: string) {
+  function hubBroadcast(msg: LinkMessage, excludeName?: string) {
     const json = JSON.stringify(msg);
     for (const [clientWs, name] of hubClients) {
       if (name !== excludeName) clientWs.send(json);
@@ -220,7 +220,7 @@ export default function (pi: ExtensionAPI) {
       }
       // Target not found — send error back to sender
       const errText = `Terminal "${msg.to}" not found`;
-      const errorMsg: MeshMessage =
+      const errorMsg: LinkMessage =
         msg.type === "prompt_request"
           ? {
               type: "prompt_response",
@@ -251,7 +251,7 @@ export default function (pi: ExtensionAPI) {
 
   // ── Incoming message handler (runs on every terminal) ────────────────────
 
-  function handleIncoming(msg: MeshMessage) {
+  function handleIncoming(msg: LinkMessage) {
     switch (msg.type) {
       // ── Client receives after registering ──
       case "welcome":
@@ -259,7 +259,7 @@ export default function (pi: ExtensionAPI) {
         connectedTerminals = msg.terminals;
         updateStatus();
         ctx?.ui.notify(
-          `Joined mesh as "${terminalName}" (${connectedTerminals.length} online)`,
+          `Joined link as "${terminalName}" (${connectedTerminals.length} online)`,
           "info",
         );
         break;
@@ -268,20 +268,20 @@ export default function (pi: ExtensionAPI) {
       case "terminal_joined":
         connectedTerminals = msg.terminals;
         updateStatus();
-        ctx?.ui.notify(`"${msg.name}" joined the mesh`, "info");
+        ctx?.ui.notify(`"${msg.name}" joined the link`, "info");
         break;
 
       case "terminal_left":
         connectedTerminals = msg.terminals;
         updateStatus();
-        ctx?.ui.notify(`"${msg.name}" left the mesh`, "info");
+        ctx?.ui.notify(`"${msg.name}" left the link`, "info");
         break;
 
       // ── Chat message ──
       case "chat":
         pi.sendMessage(
           {
-            customType: "mesh",
+            customType: "link",
             content: msg.content,
             display: true,
             details: { from: msg.from },
@@ -331,7 +331,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       case "error":
-        ctx?.ui.notify(`Mesh: ${msg.message}`, "error");
+        ctx?.ui.notify(`Link: ${msg.message}`, "error");
         break;
     }
   }
@@ -421,7 +421,7 @@ export default function (pi: ExtensionAPI) {
         updateStatus();
 
         ctx?.ui.notify(
-          `Mesh hub started on :${DEFAULT_PORT} as "${terminalName}"`,
+          `Link hub started on :${DEFAULT_PORT} as "${terminalName}"`,
           "info",
         );
         resolve(true);
@@ -470,7 +470,7 @@ export default function (pi: ExtensionAPI) {
           updateStatus();
 
           if (!manuallyDisconnected) {
-            ctx?.ui.notify("Disconnected from mesh hub", "warning");
+            ctx?.ui.notify("Disconnected from link hub", "warning");
             scheduleReconnect();
           }
         }
@@ -524,7 +524,7 @@ export default function (pi: ExtensionAPI) {
     for (const [id, pending] of pendingPromptResponses) {
       clearTimeout(pending.timeout);
       pending.resolve(
-        textResult("Mesh disconnected", { error: "disconnected" }),
+        textResult("Link disconnected", { error: "disconnected" }),
       );
     }
     pendingPromptResponses.clear();
@@ -557,7 +557,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, _ctx) => {
     ctx = _ctx;
-    if (pi.getFlag("mesh") === true) await initialize();
+    if (pi.getFlag("link") === true) await initialize();
   });
 
   pi.on("session_shutdown", async () => {
@@ -606,7 +606,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   function notConnectedResult() {
-    return textResult("Not connected to mesh");
+    return textResult("Not connected to link");
   }
 
   function truncatePreview(text: string, max = 60) {
@@ -616,14 +616,14 @@ export default function (pi: ExtensionAPI) {
   // ── Tools ────────────────────────────────────────────────────────────────
 
   pi.registerTool({
-    name: "mesh_send",
-    label: "Mesh Send",
+    name: "link_send",
+    label: "Link Send",
     description: [
-      "Send a message to another Pi terminal on the mesh.",
+      "Send a message to another Pi terminal on the link.",
       'Use to:"*" for broadcast. Set triggerTurn:true to make the receiving terminal\'s LLM respond.',
     ].join(" "),
     promptSnippet:
-      "Send a message to another Pi terminal on the local mesh network",
+      "Send a message to another Pi terminal on the local link network",
     parameters: Type.Object({
       to: Type.String({
         description: 'Target terminal name, or "*" for broadcast',
@@ -677,7 +677,7 @@ export default function (pi: ExtensionAPI) {
         typeof args.message === "string"
           ? truncatePreview(args.message)
           : "...";
-      let text = theme.fg("toolTitle", theme.bold("mesh_send "));
+      let text = theme.fg("toolTitle", theme.bold("link_send "));
       text += theme.fg("accent", target);
       if (args.triggerTurn) text += theme.fg("warning", " (trigger)");
       text += "\n  " + theme.fg("dim", preview);
@@ -695,8 +695,8 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerTool({
-    name: "mesh_prompt",
-    label: "Mesh Prompt",
+    name: "link_prompt",
+    label: "Link Prompt",
     description: [
       "Send a prompt to another Pi terminal and wait for its LLM to respond.",
       "The remote terminal processes the prompt as if a user typed it,",
@@ -767,7 +767,7 @@ export default function (pi: ExtensionAPI) {
     renderCall(args, theme) {
       const preview =
         typeof args.prompt === "string" ? truncatePreview(args.prompt) : "...";
-      let text = theme.fg("toolTitle", theme.bold("mesh_prompt "));
+      let text = theme.fg("toolTitle", theme.bold("link_prompt "));
       text += theme.fg("accent", args.to ?? "...");
       text += "\n  " + theme.fg("dim", preview);
       return new Text(text, 0, 0);
@@ -797,10 +797,10 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerTool({
-    name: "mesh_list",
-    label: "Mesh List",
-    description: "List all Pi terminals currently connected to the mesh.",
-    promptSnippet: "List connected Pi terminals on the mesh",
+    name: "link_list",
+    label: "Link List",
+    description: "List all Pi terminals currently connected to the link.",
+    promptSnippet: "List connected Pi terminals on the link",
     parameters: Type.Object({}),
 
     async execute() {
@@ -829,7 +829,7 @@ export default function (pi: ExtensionAPI) {
         return new Text(txt?.type === "text" ? txt.text : "", 0, 0);
       }
 
-      let text = theme.fg("toolTitle", theme.bold("mesh "));
+      let text = theme.fg("toolTitle", theme.bold("link "));
       text += theme.fg("muted", `(${details.role}) `);
       text += theme.fg("accent", `${details.terminals.length} terminal(s)`);
       for (const name of details.terminals) {
@@ -846,23 +846,23 @@ export default function (pi: ExtensionAPI) {
 
   // ── Commands ─────────────────────────────────────────────────────────────
 
-  pi.registerCommand("mesh", {
-    description: "Show mesh status",
+  pi.registerCommand("link", {
+    description: "Show link status",
     handler: async (_args, _ctx) => {
       if (role === "disconnected") {
-        _ctx.ui.notify("Mesh: not connected", "warning");
+        _ctx.ui.notify("Link: not connected", "warning");
         return;
       }
       const names = connectedTerminals.join(", ");
       _ctx.ui.notify(
-        `Mesh: ${terminalName} (${role}) · ${connectedTerminals.length} online: ${names}`,
+        `Link: ${terminalName} (${role}) · ${connectedTerminals.length} online: ${names}`,
         "info",
       );
     },
   });
 
-  pi.registerCommand("mesh-name", {
-    description: "Change mesh name. No arg = use session name",
+  pi.registerCommand("link-name", {
+    description: "Change link name. No arg = use session name",
     handler: async (args, _ctx) => {
       let newName = args.trim();
       if (!newName) {
@@ -872,7 +872,7 @@ export default function (pi: ExtensionAPI) {
           newName = sessionName;
         } else {
           _ctx.ui.notify(
-            `Current name: "${terminalName}". No session name set. Usage: /mesh-name <name>`,
+            `Current name: "${terminalName}". No session name set. Usage: /link-name <name>`,
             "info",
           );
           return;
@@ -922,16 +922,16 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  pi.registerCommand("mesh-broadcast", {
-    description: "Broadcast a message to all mesh terminals",
+  pi.registerCommand("link-broadcast", {
+    description: "Broadcast a message to all connected terminals",
     handler: async (args, _ctx) => {
       const message = args.trim();
       if (!message) {
-        _ctx.ui.notify("Usage: /mesh-broadcast <message>", "warning");
+        _ctx.ui.notify("Usage: /link-broadcast <message>", "warning");
         return;
       }
       if (role === "disconnected") {
-        _ctx.ui.notify("Not connected to mesh", "warning");
+        _ctx.ui.notify("Not connected to link", "warning");
         return;
       }
       routeMessage({
@@ -945,8 +945,8 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  pi.registerCommand("mesh-disconnect", {
-    description: "Disconnect from the mesh",
+  pi.registerCommand("link-disconnect", {
+    description: "Disconnect from the link",
     handler: async (_args, _ctx) => {
       if (role === "disconnected") {
         _ctx.ui.notify("Already disconnected", "info");
@@ -954,12 +954,12 @@ export default function (pi: ExtensionAPI) {
       }
       manuallyDisconnected = true;
       disconnect();
-      _ctx.ui.notify("Disconnected from mesh", "info");
+      _ctx.ui.notify("Disconnected from link", "info");
     },
   });
 
-  pi.registerCommand("mesh-connect", {
-    description: "Connect to the mesh (after manual disconnect)",
+  pi.registerCommand("link-connect", {
+    description: "Connect to the link (after manual disconnect)",
     handler: async (_args, _ctx) => {
       if (role !== "disconnected") {
         _ctx.ui.notify(
@@ -975,9 +975,9 @@ export default function (pi: ExtensionAPI) {
 
   // ── Message renderer ─────────────────────────────────────────────────────
 
-  pi.registerMessageRenderer("mesh", (message, _options, theme) => {
+  pi.registerMessageRenderer("link", (message, _options, theme) => {
     const from =
-      (message.details as Record<string, unknown> | undefined)?.from ?? "mesh";
+      (message.details as Record<string, unknown> | undefined)?.from ?? "link";
     const text =
       theme.fg("accent", `⚡ [${from}] `) +
       theme.fg("text", String(message.content));

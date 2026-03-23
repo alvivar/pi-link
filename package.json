@@ -1,16 +1,17 @@
 {
-  "name": "pi-mesh",
+  "name": "pi-link",
   "version": "0.1.0",
-  "description": "WebSocket-based inter-terminal communication for Pi. Connect multiple Pi terminals over a local mesh network.",
+  "description": "WebSocket-based inter-terminal communication for Pi. Connect multiple Pi terminals over a local link network.",
   "author": "alvivar",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/alvivar/pi-mesh"
+    "url": "https://github.com/alvivar/pi-link"
   },
   "keywords": [
+    "pi-package",
     "pi",
-    "mesh",
+    "link",
     "websocket",
     "terminal",
     "multi-agent"
