@@ -310,6 +310,8 @@ When the hub goes down and a client promotes itself, terminal names and in-fligh
 | 4   | **Single remote prompt per terminal**     | No queuing — immediate rejection if the target is busy. Keeps the model simple and avoids unbounded backlogs.                                                 |
 | 5   | **No message persistence**                | Purely ephemeral WebSocket frames. Messages are lost if the recipient is offline.                                                                             |
 | 6   | **Client rename triggers full reconnect** | Changing a client's name requires a new `register` message, so the client disconnects and reconnects. Hub renames are handled in-place with collision checks. |
+| 7   | **Single-machine / localhost-only**       | Mesh only binds to `127.0.0.1`; terminals on different machines cannot join.                                                                                  |
+| 8   | **Opt-in startup**                        | Mesh is off by default. Use `pi --mesh` or `/mesh-connect` to participate. See [Configuration](#configuration).                                               |
 
 ---
 
