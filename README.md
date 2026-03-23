@@ -2,7 +2,7 @@
 
 A WebSocket-based inter-terminal communication system that creates a local network between multiple Pi coding agent terminals. Enables terminals to discover each other, exchange messages, and orchestrate work across agents — all automatically on `localhost`.
 
-> Self-contained TypeScript in a single `index.ts` file. No configuration required.
+> Self-contained TypeScript in a single `index.ts` file. Start Pi with `--mesh` to enable.
 
 ---
 
@@ -57,14 +57,16 @@ pi uninstall git:github.com/alvivar/pi-mesh
 
 ### Usage
 
-Start two or more `pi` terminals — they discover each other automatically:
+Mesh is **off by default**. Start Pi with the `--mesh` flag to auto-connect on startup:
 
 ```
 Terminal 1                            Terminal 2
 ----------                            ----------
-$ pi                                  $ pi
+$ pi --mesh                           $ pi --mesh
 ✓ Mesh hub on :9900 as "t-a1b2"      ✓ Joined mesh as "t-c3d4" (2 online)
 ```
+
+Already in a session without `--mesh`? You can connect mid-session with `/mesh-connect`.
 
 Use `/mesh` in any terminal to check status, or let the LLM tools handle cross-terminal coordination.
 
@@ -72,7 +74,7 @@ Use `/mesh` in any terminal to check status, or let the LLM tools handle cross-t
 
 ## Walkthrough
 
-Here's a concrete example of two terminals collaborating. Open two separate `pi` sessions.
+Here's a concrete example of two terminals collaborating. Open two separate `pi --mesh` sessions.
 
 **Terminal 1** — rename and check status:
 
@@ -118,7 +120,21 @@ Every other terminal sees:
 
 ## Configuration
 
-No configuration required. The extension auto-discovers other terminals on `127.0.0.1:9900`. See [Limitations](#limitations--design-decisions) for details on the hardcoded port.
+Mesh is **off by default**. Without `--mesh`, the extension is completely silent — no status bar text, no connection attempts, no warnings.
+
+### Connecting
+
+| Method             | When                                | Auto-reconnect on hub crash?     |
+| ------------------ | ----------------------------------- | -------------------------------- |
+| `pi --mesh`        | Auto-connect on startup             | Yes                              |
+| `/mesh-connect`    | Opt-in mid-session (no flag needed) | Yes                              |
+| `/mesh-disconnect` | Opt-out mid-session                 | Suppressed until `/mesh-connect` |
+
+`/mesh-connect` works fully regardless of whether `--mesh` was passed at startup — once connected, auto-reconnect on hub loss is enabled just like with the flag.
+
+`/mesh-disconnect` always wins — even if `--mesh` was passed, explicit user action overrides it. Only `/mesh-connect` brings it back.
+
+Once connected, terminals auto-discover each other on `127.0.0.1:9900`. See [Limitations](#limitations--design-decisions) for details on the hardcoded port.
 
 ---
 
@@ -190,11 +206,13 @@ Connected terminals:
 
 ## Slash Commands
 
-| Command                 | Purpose                                                                                     |
-| ----------------------- | ------------------------------------------------------------------------------------------- |
-| `/mesh`                 | Show mesh status (name, role, online count)                                                 |
-| `/mesh-name [name]`     | Rename this terminal. With no argument, adopts the current Pi session name. Collision-safe. |
-| `/mesh-broadcast <msg>` | Broadcast a chat message to all other terminals                                             |
+| Command                 | Purpose                                                                                                  |
+| ----------------------- | -------------------------------------------------------------------------------------------------------- |
+| `/mesh`                 | Show mesh status (name, role, online count)                                                              |
+| `/mesh-name [name]`     | Rename this terminal. With no argument, adopts the current Pi session name if available. Collision-safe. |
+| `/mesh-broadcast <msg>` | Broadcast a chat message to all other terminals                                                          |
+| `/mesh-connect`         | Connect to the mesh (works anytime, with or without `--mesh`)                                            |
+| `/mesh-disconnect`      | Disconnect from the mesh and suppress auto-reconnect (overrides `--mesh`)                                |
 
 ### Examples
 
@@ -205,9 +223,21 @@ Connected terminals:
 > /mesh-name orchestrator
 ✓ Renamed to "orchestrator"
 
+> /mesh-name
+✓ Renamed to "my-session"          (adopts Pi session name)
+
 > /mesh-broadcast starting the build pipeline
 ✓ Broadcast sent
+
+> /mesh-disconnect
+✓ Disconnected from mesh
+
+> /mesh-connect
+✓ Joined mesh as "orchestrator" (3 online)    ... or ...
+✓ Mesh hub started on :9900 as "orchestrator" ... if no hub exists
 ```
+
+Mesh is off by default — use `pi --mesh` to auto-connect on startup, or `/mesh-connect` to join mid-session. `/mesh-disconnect` leaves the mesh and suppresses auto-reconnect — even if `--mesh` was passed — until you explicitly `/mesh-connect` again.
 
 ---
 
@@ -237,7 +267,9 @@ Despite the name "mesh," the actual topology is **hub-spoke (star)**:
 
 ### Auto-Discovery Protocol
 
-Startup follows a simple fallback sequence:
+The `--mesh` flag controls whether discovery runs at startup. Without it, the extension stays dormant. `/mesh-connect` triggers the same discovery sequence mid-session.
+
+The sequence is a simple fallback:
 
 1. Attempt to connect as a **client** to `127.0.0.1:9900`.
 2. If connection fails → become the **hub** (start a WebSocket server on that port).
@@ -296,13 +328,13 @@ When the hub goes down and a client promotes itself, terminal names and in-fligh
 
 | Package | Version | Purpose                             |
 | ------- | ------- | ----------------------------------- |
-| `ws`    | ^8.18.0 | WebSocket library (server + client) |
+| `ws`    | ^8.20.0 | WebSocket library (server + client) |
 
 ### Development
 
 | Package     | Version | Purpose                     |
 | ----------- | ------- | --------------------------- |
-| `@types/ws` | ^8.5.0  | TypeScript type definitions |
+| `@types/ws` | ^8.18.1 | TypeScript type definitions |
 
 ### Provided by Pi (no install needed)
 
@@ -319,10 +351,10 @@ When the hub goes down and a client promotes itself, terminal names and in-fligh
   "name": "pi-mesh",
   "private": true,
   "dependencies": {
-    "ws": "^8.18.0"
+    "ws": "^8.20.0"
   },
   "devDependencies": {
-    "@types/ws": "^8.5.0"
+    "@types/ws": "^8.18.1"
   },
   "pi": {
     "extensions": ["./index.ts"]
@@ -414,12 +446,13 @@ Default names are random 4-character hex IDs: `t-a1b2`, `t-c3d4`, etc.
 
 ### State Management
 
-| State Field              | Type                                  | Purpose                                             |
-| ------------------------ | ------------------------------------- | --------------------------------------------------- |
-| `role`                   | `"hub" \| "client" \| "disconnected"` | Current network role                                |
-| `isAgentBusy`            | `boolean`                             | Prevents accepting remote prompts during agent runs |
-| `pendingRemotePrompt`    | `object \| null`                      | Tracks the single in-flight remote prompt execution |
-| `pendingPromptResponses` | `Map`                                 | Outstanding prompt RPCs awaiting responses          |
+| State Field              | Type                                  | Purpose                                              |
+| ------------------------ | ------------------------------------- | ---------------------------------------------------- |
+| `role`                   | `"hub" \| "client" \| "disconnected"` | Current network role                                 |
+| `isAgentBusy`            | `boolean`                             | Prevents accepting remote prompts during agent runs  |
+| `manuallyDisconnected`   | `boolean`                             | Set by `/mesh-disconnect`; suppresses auto-reconnect |
+| `pendingRemotePrompt`    | `object \| null`                      | Tracks the single in-flight remote prompt execution  |
+| `pendingPromptResponses` | `Map`                                 | Outstanding prompt RPCs awaiting responses           |
 
 ### Message Routing & Error Handling
 
@@ -428,13 +461,22 @@ Default names are random 4-character hex IDs: `t-a1b2`, `t-c3d4`, etc.
 - **Hub** — delivery is authoritative. If the target terminal isn't connected, the hub sends a protocol-level error back to the sender. For `prompt_request` messages to unknown targets, the hub sends a `prompt_response` with an error field so the sender's pending promise resolves immediately rather than timing out.
 - **Client** — delivery is optimistic (`true` means "sent to hub"). The hub handles routing and errors via the protocol.
 
+### Connection Lifecycle
+
+Internally, teardown is split into two functions:
+
+- **`disconnect()`** — closes sockets, clears connection state, resolves pending promises. Used by `/mesh-disconnect` and called internally by `cleanup()`.
+- **`cleanup()`** — calls `disconnect()` then marks the extension as disposed. Used on `session_shutdown`.
+
+The `manuallyDisconnected` flag distinguishes user-initiated disconnects (`/mesh-disconnect`) from connection loss. When set, `scheduleReconnect()` is suppressed — the terminal stays offline until `/mesh-connect` is explicitly called.
+
 ### Agent Lifecycle Integration
 
 The extension hooks into Pi's agent lifecycle events:
 
 - **`agent_start`** → Sets `isAgentBusy = true`, blocking incoming remote prompts.
 - **`agent_end`** → Checks if a remote prompt was running. If so, extracts the last assistant response from `event.messages` and sends back a `prompt_response`.
-- **`session_shutdown`** → Full cleanup: closes all sockets and resolves pending promises.
+- **`session_shutdown`** → Full cleanup via `cleanup()`: closes all sockets, resolves pending promises, and disposes the extension.
 
 ### Custom Message Renderer
 
@@ -443,3 +485,7 @@ Incoming mesh chat messages render with a styled prefix using the theme's accent
 ```
 ⚡ [pi-2] Here's the analysis you requested...
 ```
+
+### Status Bar
+
+The mesh status text in Pi's footer uses `theme.fg("dim", ...)` to match Pi's standard footer styling (gray, non-intrusive).

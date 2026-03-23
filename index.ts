@@ -9,7 +9,7 @@
  *   - Auto-discovery: try to connect → fall back to becoming the hub
  *   - Named terminals with uniqueness enforcement
  *   - LLM tools: mesh_send (chat), mesh_prompt (remote prompt + response), mesh_list
- *   - Commands: /mesh, /mesh-name, /mesh-broadcast
+ *   - Commands: /mesh, /mesh-name, /mesh-broadcast, /mesh-connect, /mesh-disconnect
  *   - Custom message renderer for incoming mesh messages
  *   - Auto-reconnect with hub promotion on disconnect
  *
@@ -96,6 +96,12 @@ type MeshMessage =
 // ─── Extension ───────────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
+  pi.registerFlag("mesh", {
+    description: "Connect to mesh on startup",
+    type: "boolean",
+    default: false,
+  });
+
   // ── State ────────────────────────────────────────────────────────────────
 
   let role: "hub" | "client" | "disconnected" = "disconnected";
@@ -104,6 +110,7 @@ export default function (pi: ExtensionAPI) {
   let ctx: ExtensionContext | undefined;
   let isAgentBusy = false;
   let disposed = false;
+  let manuallyDisconnected = false;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Hub state
@@ -461,8 +468,11 @@ export default function (pi: ExtensionAPI) {
           role = "disconnected";
           connectedTerminals = [];
           updateStatus();
-          ctx?.ui.notify("Disconnected from mesh hub", "warning");
-          scheduleReconnect();
+
+          if (!manuallyDisconnected) {
+            ctx?.ui.notify("Disconnected from mesh hub", "warning");
+            scheduleReconnect();
+          }
         }
       });
 
@@ -492,18 +502,19 @@ export default function (pi: ExtensionAPI) {
   }
 
   function scheduleReconnect() {
-    if (disposed || reconnectTimer) return;
+    if (disposed || manuallyDisconnected || reconnectTimer) return;
     const delay = RECONNECT_DELAY_MS + Math.random() * 3000;
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
-      if (role === "disconnected" && !disposed) initialize();
+      if (role === "disconnected" && !disposed && !manuallyDisconnected)
+        initialize();
     }, delay);
   }
 
   // ── Cleanup ──────────────────────────────────────────────────────────────
 
-  function cleanup() {
-    disposed = true;
+  function disconnect() {
+    // Clear reconnect timer first to prevent races
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
@@ -512,7 +523,9 @@ export default function (pi: ExtensionAPI) {
     // Clean up pending prompts
     for (const [id, pending] of pendingPromptResponses) {
       clearTimeout(pending.timeout);
-      pending.resolve(textResult("Mesh shutting down", { error: "shutdown" }));
+      pending.resolve(
+        textResult("Mesh disconnected", { error: "disconnected" }),
+      );
     }
     pendingPromptResponses.clear();
 
@@ -532,13 +545,19 @@ export default function (pi: ExtensionAPI) {
 
     role = "disconnected";
     connectedTerminals = [];
+    updateStatus();
+  }
+
+  function cleanup() {
+    disposed = true;
+    disconnect();
   }
 
   // ── Lifecycle events ─────────────────────────────────────────────────────
 
   pi.on("session_start", async (_event, _ctx) => {
     ctx = _ctx;
-    await initialize();
+    if (pi.getFlag("mesh") === true) await initialize();
   });
 
   pi.on("session_shutdown", async () => {
@@ -923,6 +942,34 @@ export default function (pi: ExtensionAPI) {
         triggerTurn: false,
       });
       _ctx.ui.notify("Broadcast sent", "info");
+    },
+  });
+
+  pi.registerCommand("mesh-disconnect", {
+    description: "Disconnect from the mesh",
+    handler: async (_args, _ctx) => {
+      if (role === "disconnected") {
+        _ctx.ui.notify("Already disconnected", "info");
+        return;
+      }
+      manuallyDisconnected = true;
+      disconnect();
+      _ctx.ui.notify("Disconnected from mesh", "info");
+    },
+  });
+
+  pi.registerCommand("mesh-connect", {
+    description: "Connect to the mesh (after manual disconnect)",
+    handler: async (_args, _ctx) => {
+      if (role !== "disconnected") {
+        _ctx.ui.notify(
+          `Already connected as "${terminalName}" (${role})`,
+          "info",
+        );
+        return;
+      }
+      manuallyDisconnected = false;
+      await initialize();
     },
   });
 
