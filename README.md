@@ -120,21 +120,17 @@ Every other terminal sees:
 
 ## Configuration
 
-Mesh is **off by default**. Without `--mesh`, the extension is completely silent — no status bar text, no connection attempts, no warnings.
+Mesh is **off by default**. Without `--mesh`, the extension is completely silent — no status bar, no connections, no warnings.
 
-### Connecting
-
-| Method             | When                                | Auto-reconnect on hub crash?     |
-| ------------------ | ----------------------------------- | -------------------------------- |
-| `pi --mesh`        | Auto-connect on startup             | Yes                              |
-| `/mesh-connect`    | Opt-in mid-session (no flag needed) | Yes                              |
+| Method             | When                                | Auto-reconnect? |
+| ------------------ | ----------------------------------- | --- |
+| `pi --mesh`        | Auto-connect on startup             | Yes |
+| `/mesh-connect`    | Opt-in mid-session (no flag needed) | Yes |
 | `/mesh-disconnect` | Opt-out mid-session                 | Suppressed until `/mesh-connect` |
 
-`/mesh-connect` works fully regardless of whether `--mesh` was passed at startup — once connected, auto-reconnect on hub loss is enabled just like with the flag.
+`/mesh-connect` enables full mesh participation regardless of whether `--mesh` was passed. `/mesh-disconnect` always wins — even over `--mesh` — until you explicitly `/mesh-connect` again.
 
-`/mesh-disconnect` always wins — even if `--mesh` was passed, explicit user action overrides it. Only `/mesh-connect` brings it back.
-
-Once connected, terminals auto-discover each other on `127.0.0.1:9900`. See [Limitations](#limitations--design-decisions) for details on the hardcoded port.
+Once connected, terminals discover each other on `127.0.0.1:9900`. See [Limitations](#limitations--design-decisions) for the hardcoded port.
 
 ---
 
@@ -150,9 +146,7 @@ The extension registers three tools that the LLM can invoke during agent runs.
 | `mesh_prompt` | Run a prompt on a remote terminal and wait for reply | The remote terminal's assistant response |
 | `mesh_list`   | List currently connected terminals                   | Terminal directory with roles            |
 
-Use **`mesh_send`** to notify or steer another terminal. Use **`mesh_prompt`** when you need the other terminal's answer back in the current tool result.
-
-**If you need the other terminal's answer back here, use `mesh_prompt`, not `mesh_send`.**
+**If you need the other terminal's answer back, use `mesh_prompt`.** Use `mesh_send` to notify or steer without waiting.
 
 ### `mesh_send`
 
@@ -164,13 +158,11 @@ Send a fire-and-forget chat message to a specific terminal or broadcast to all.
 | `message`     | `string`  | Message content                                      |
 | `triggerTurn` | `boolean` | If `true`, the receiver's LLM responds automatically |
 
-When `triggerTurn` is enabled, the message is delivered via `pi.sendMessage` with `deliverAs: "steer"`, causing the remote agent to kick off an LLM turn.
-
-**Returns:** send/delivery status only — **not** the recipient's LLM response. Even with `triggerTurn: true`, the remote terminal's reply stays on that terminal. Use `mesh_prompt` when you need the answer back.
+When `triggerTurn` is enabled, the message is delivered via `pi.sendMessage` with `deliverAs: "steer"`, causing the remote agent to kick off an LLM turn. Note: `triggerTurn` does **not** cause the response to come back to the caller — use `mesh_prompt` for that.
 
 > **Broadcast note:** Sending to `"*"` delivers to **all other terminals** — the sender is excluded.
 
-The tool pre-validates the target name against the local terminal list before sending, catching typos early. On the hub, delivery confirmation is authoritative. On clients, delivery is optimistic — the message is sent to the hub for routing, and the hub handles errors via protocol-level responses.
+Pre-validates the target name against the local terminal list before sending, catching typos early. On the hub, delivery confirmation is authoritative. On clients, delivery is optimistic — the message is sent to the hub for routing.
 
 ### `mesh_prompt`
 
@@ -181,9 +173,8 @@ Send a prompt to a remote terminal and **wait** for the LLM's response (synchron
 | `to`      | `string` | Target terminal name |
 | `prompt`  | `string` | Prompt text to send  |
 
-**Returns:** the remote terminal's actual assistant reply text as the tool result.
-
 - The remote terminal processes the prompt via `pi.sendUserMessage()` — as if a user typed it.
+- Returns the remote terminal's actual assistant reply text as the tool result.
 - **2-minute timeout**; supports abort signals.
 - **Early failure detection** — if the message can't be delivered (e.g., target not found), the tool resolves immediately with an error instead of waiting for the timeout.
 - Targets **one terminal at a time** (no broadcast mode).
@@ -237,7 +228,7 @@ Connected terminals:
 ✓ Mesh hub started on :9900 as "orchestrator" ... if no hub exists
 ```
 
-Mesh is off by default — use `pi --mesh` to auto-connect on startup, or `/mesh-connect` to join mid-session. `/mesh-disconnect` leaves the mesh and suppresses auto-reconnect — even if `--mesh` was passed — until you explicitly `/mesh-connect` again.
+See [Configuration](#configuration) for details on `--mesh`, `/mesh-connect`, and `/mesh-disconnect` behavior.
 
 ---
 
@@ -267,7 +258,7 @@ Despite the name "mesh," the actual topology is **hub-spoke (star)**:
 
 ### Auto-Discovery Protocol
 
-The `--mesh` flag controls whether discovery runs at startup. Without it, the extension stays dormant. `/mesh-connect` triggers the same discovery sequence mid-session.
+The discovery sequence runs on startup (with `--mesh`) or when `/mesh-connect` is used. See [Configuration](#configuration) for details.
 
 The sequence is a simple fallback:
 
@@ -287,7 +278,7 @@ There is **no explicit leader election** — promotion is race-based.
 
 ### Port 9900 is already in use
 
-If another process occupies port 9900, the terminal can't become the hub. It will attempt to connect as a client instead (which also fails if there's no real hub), then retry after 2–5 seconds. **The port is hardcoded** — there's no configuration to change it. You'll need to free the port or modify `DEFAULT_PORT` in `index.ts`.
+If another process occupies port 9900, the terminal can't become the hub. It will attempt to connect as a client instead (which also fails if there's no real hub), then retry after 2–5 seconds. Free the port or modify `DEFAULT_PORT` in `index.ts` — see [Limitations](#limitations--design-decisions).
 
 ### "Terminal is busy" rejections
 
@@ -478,14 +469,6 @@ The extension hooks into Pi's agent lifecycle events:
 - **`agent_end`** → Checks if a remote prompt was running. If so, extracts the last assistant response from `event.messages` and sends back a `prompt_response`.
 - **`session_shutdown`** → Full cleanup via `cleanup()`: closes all sockets, resolves pending promises, and disposes the extension.
 
-### Custom Message Renderer
+### Rendering
 
-Incoming mesh chat messages render with a styled prefix using the theme's accent color:
-
-```
-⚡ [pi-2] Here's the analysis you requested...
-```
-
-### Status Bar
-
-The mesh status text in Pi's footer uses `theme.fg("dim", ...)` to match Pi's standard footer styling (gray, non-intrusive).
+Incoming mesh chat messages render with a styled `⚡ [sender]` prefix using the theme's accent color. The mesh status text in Pi's footer uses `theme.fg("dim", ...)` to match Pi's standard footer styling.
