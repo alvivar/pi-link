@@ -83,7 +83,9 @@ Here's a concrete example of two terminals collaborating. Open two separate `pi 
 ✓ Renamed to "builder"
 
 > /link
-⚡ Link: "builder" (hub) · 2 terminals online: builder, researcher
+⚡ Link: builder (hub) · 2 online
+  builder: idle (5s)
+  researcher: idle (12s)
 ```
 
 **Terminal 2** — rename it too:
@@ -122,11 +124,11 @@ Every other terminal sees:
 
 Link is **off by default**. Without `--link`, the extension is completely silent — no status bar, no connections, no warnings.
 
-| Method              | When                                | Auto-reconnect? |
-| ------------------- | ----------------------------------- | --- |
-| `pi --link`         | Auto-connect on startup             | Yes |
-| `/link-connect`     | Opt-in mid-session (no flag needed) | Yes |
-| `/link-disconnect`  | Opt-out mid-session                 | Suppressed until `/link-connect` |
+| Method             | When                                | Auto-reconnect?                  |
+| ------------------ | ----------------------------------- | -------------------------------- |
+| `pi --link`        | Auto-connect on startup             | Yes                              |
+| `/link-connect`    | Opt-in mid-session (no flag needed) | Yes                              |
+| `/link-disconnect` | Opt-out mid-session                 | Suppressed until `/link-connect` |
 
 `/link-connect` enables full participation in Pi Link regardless of whether `--link` was passed. `/link-disconnect` always wins — even over `--link` — until you explicitly `/link-connect` again.
 
@@ -140,11 +142,11 @@ The extension registers three tools that the LLM can invoke during agent runs.
 
 ### Which tool should I use?
 
-| Tool           | Behavior                                             | Returns                                  |
-| -------------- | ---------------------------------------------------- | ---------------------------------------- |
-| `link_send`    | Send a message; optionally trigger the remote LLM    | Send/delivery status only                |
-| `link_prompt`  | Run a prompt on a remote terminal and wait for reply | The remote terminal's assistant response |
-| `link_list`    | List currently connected terminals                   | Terminal directory with roles            |
+| Tool          | Behavior                                             | Returns                                  |
+| ------------- | ---------------------------------------------------- | ---------------------------------------- |
+| `link_send`   | Send a message; optionally trigger the remote LLM    | Send/delivery status only                |
+| `link_prompt` | Run a prompt on a remote terminal and wait for reply | The remote terminal's assistant response |
+| `link_list`   | List currently connected terminals                   | Terminal directory with roles and status |
 
 **If you need the other terminal's answer back, use `link_prompt`.** Use `link_send` to notify or steer without waiting.
 
@@ -182,34 +184,47 @@ Send a prompt to a remote terminal and **wait** for the LLM's response (synchron
 
 ### `link_list`
 
-Lists all connected terminals with role info and self-identification. Takes no parameters.
+Lists all connected terminals with role info, live agent status, and self-identification. Takes no parameters.
+
+Each terminal's status is derived automatically from Pi lifecycle events — agents can't set it manually. Three states:
+
+| Status            | Meaning                 |
+| ----------------- | ----------------------- |
+| `idle (2m)`       | Waiting for user input  |
+| `thinking (3s)`   | LLM is generating       |
+| `tool:bash (12s)` | Running a specific tool |
+
+Durations are computed at render time from a `since` timestamp — no timer traffic over the wire. Terminals that just joined with no status data yet render as blank, not fake idle.
 
 **Example output:**
 
 ```
-Connected terminals:
-  • pi-1 (you)
-  • pi-2
-  • pi-3
+link (hub) 3 terminal(s)
+  • builder@pi-link (you)  thinking (3s)
+  • reviewer@pi-link       idle (45s)
+  • docs@pi-link           tool:read (2s)
 ```
 
 ---
 
 ## Slash Commands
 
-| Command                  | Purpose                                                                                                   |
-| ------------------------ | --------------------------------------------------------------------------------------------------------- |
-| `/link`                  | Show link status (name, role, online count)                                                               |
-| `/link-name [name]`      | Rename this terminal. With no argument, adopts the current Pi session name if available. Collision-safe.  |
-| `/link-broadcast <msg>`  | Broadcast a chat message to all other terminals                                                           |
-| `/link-connect`          | Connect to Pi Link (works anytime, with or without `--link`)                                              |
-| `/link-disconnect`       | Disconnect from Pi Link and suppress auto-reconnect (overrides `--link`)                                  |
+| Command                 | Purpose                                                                                                  |
+| ----------------------- | -------------------------------------------------------------------------------------------------------- |
+| `/link`                 | Show link status (name, role, online count, agent status per terminal)                                   |
+| `/link-name [name]`     | Rename this terminal. With no argument, adopts the current Pi session name if available. Collision-safe. |
+| `/link-broadcast <msg>` | Broadcast a chat message to all other terminals                                                          |
+| `/link-connect`         | Connect to Pi Link (works anytime, with or without `--link`)                                             |
+| `/link-disconnect`      | Disconnect from Pi Link and suppress auto-reconnect (overrides `--link`)                                 |
 
 ### Examples
 
 ```
 > /link
-⚡ Link: "builder" (hub) · 3 online: builder, worker-1, worker-2
+⚡ Link: builder (hub) · 3 online
+  builder: idle (12s)
+  worker-1: thinking (3s)
+  worker-2: tool:bash (5s)
 
 > /link-name orchestrator
 ✓ Renamed to "orchestrator"
@@ -333,7 +348,7 @@ When the hub goes down and a client promotes itself, terminal names and in-fligh
 
 | Package                         | Purpose                                          |
 | ------------------------------- | ------------------------------------------------ |
-| `@mariozechner/pi-coding-agent` | Pi SDK types (ExtensionAPI, ExtensionContext)     |
+| `@mariozechner/pi-coding-agent` | Pi SDK types (ExtensionAPI, ExtensionContext)    |
 | `@mariozechner/pi-tui`          | TUI Text widget for custom message rendering     |
 | `@sinclair/typebox`             | JSON Schema type definitions for tool parameters |
 
@@ -365,18 +380,19 @@ The `pi.extensions` field tells Pi which files to load as extensions. Here it po
 
 ### Protocol
 
-The wire protocol consists of **8 message types**, all serialized as JSON over WebSocket frames:
+The wire protocol consists of **9 message types**, all serialized as JSON over WebSocket frames:
 
-| Type              | Direction     | Purpose                                               |
-| ----------------- | ------------- | ----------------------------------------------------- |
-| `register`        | Client → Hub  | First message after connecting; requests a name       |
-| `welcome`         | Hub → Client  | Confirms assigned name (deduplicated) + terminal list |
-| `terminal_joined` | Hub → All     | Broadcast when a terminal joins                       |
-| `terminal_left`   | Hub → All     | Broadcast when a terminal disconnects                 |
-| `chat`            | Any → Any/All | Fire-and-forget message; optionally triggers LLM turn |
-| `prompt_request`  | Any → Any     | Request a remote terminal to execute a prompt         |
-| `prompt_response` | Any → Any     | Response carrying the remote prompt result            |
-| `error`           | Hub → Client  | Error notification                                    |
+| Type              | Direction       | Purpose                                                 |
+| ----------------- | --------------- | ------------------------------------------------------- |
+| `register`        | Client → Hub    | First message after connecting; requests a name         |
+| `welcome`         | Hub → Client    | Confirms assigned name, terminal list + status snapshot |
+| `terminal_joined` | Hub → All       | Broadcast when a terminal joins                         |
+| `terminal_left`   | Hub → All       | Broadcast when a terminal disconnects                   |
+| `chat`            | Any → Any/All   | Fire-and-forget message; optionally triggers LLM turn   |
+| `prompt_request`  | Any → Any       | Request a remote terminal to execute a prompt           |
+| `prompt_response` | Any → Any       | Response carrying the remote prompt result              |
+| `status_update`   | Any → Hub → All | Terminal broadcasts its agent status change             |
+| `error`           | Hub → Client    | Error notification                                      |
 
 ### Message Flow Examples
 
@@ -388,13 +404,13 @@ Client                         Hub
   | register {name:"builder"}   |
   |---------------------------->|
   |                             |
-  | welcome {name:"builder",    |
-  | terminals:["pi-1"]}         |
+  | welcome {name, terminals,   |
+  | statuses}                   |
   |<----------------------------|
   |                             |
 ```
 
-Hub then broadcasts `terminal_joined` to the other connected terminals.
+Hub then broadcasts `terminal_joined` to the other connected terminals. The `welcome` message includes a status snapshot for all connected terminals (fields omitted above for brevity).
 
 **Sending a chat message:**
 
@@ -439,13 +455,13 @@ Default names are random 4-character hex IDs: `t-a1b2`, `t-c3d4`, etc.
 
 ### State Management
 
-| State Field              | Type                                    | Purpose                                               |
-| ------------------------ | --------------------------------------- | ----------------------------------------------------- |
-| `role`                   | `"hub" \| "client" \| "disconnected"`   | Current network role                                  |
-| `isAgentBusy`            | `boolean`                               | Prevents accepting remote prompts during agent runs   |
-| `manuallyDisconnected`   | `boolean`                               | Set by `/link-disconnect`; suppresses auto-reconnect  |
-| `pendingRemotePrompt`    | `object \| null`                        | Tracks the single in-flight remote prompt execution   |
-| `pendingPromptResponses` | `Map`                                   | Outstanding prompt RPCs awaiting responses            |
+| State Field              | Type                                  | Purpose                                              |
+| ------------------------ | ------------------------------------- | ---------------------------------------------------- |
+| `role`                   | `"hub" \| "client" \| "disconnected"` | Current network role                                 |
+| `isAgentBusy`            | `boolean`                             | Prevents accepting remote prompts during agent runs  |
+| `manuallyDisconnected`   | `boolean`                             | Set by `/link-disconnect`; suppresses auto-reconnect |
+| `pendingRemotePrompt`    | `object \| null`                      | Tracks the single in-flight remote prompt execution  |
+| `pendingPromptResponses` | `Map`                                 | Outstanding prompt RPCs awaiting responses           |
 
 ### Message Routing & Error Handling
 
@@ -467,9 +483,13 @@ The `manuallyDisconnected` flag distinguishes user-initiated disconnects (`/link
 
 The extension hooks into Pi's agent lifecycle events:
 
-- **`agent_start`** → Sets `isAgentBusy = true`, blocking incoming remote prompts.
-- **`agent_end`** → Checks if a remote prompt was running. If so, extracts the last assistant response from `event.messages` and sends back a `prompt_response`.
+- **`agent_start`** → Sets `isAgentBusy = true`, blocking incoming remote prompts. Broadcasts `status_update` (`thinking`).
+- **`agent_end`** → Checks if a remote prompt was running. If so, extracts the last assistant response from `event.messages` and sends back a `prompt_response`. Broadcasts `status_update` (`idle`).
+- **`tool_execution_start`** → Broadcasts `status_update` (`tool:<name>`).
+- **`tool_execution_end`** → Clears tool status; broadcasts `status_update` (`thinking`) while the agent run continues.
 - **`session_shutdown`** → Full cleanup via `cleanup()`: closes all sockets, resolves pending promises, and disposes the extension.
+
+Status updates are push-based: each terminal broadcasts changes to the hub, which fans them out. New joiners receive a status snapshot for all terminals in the `welcome` message. Durations are computed at render time from a `since` timestamp — no polling or timer traffic over the wire.
 
 ### Rendering
 

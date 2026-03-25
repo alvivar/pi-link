@@ -45,6 +45,7 @@ interface WelcomeMsg {
   type: "welcome";
   name: string;
   terminals: string[];
+  statuses?: Record<string, LinkStatus>;
 }
 interface TerminalJoinedMsg {
   type: "terminal_joined";
@@ -78,10 +79,20 @@ interface PromptResponseMsg {
   response: string;
   error?: string;
 }
+interface StatusUpdateMsg {
+  type: "status_update";
+  name: string;
+  status: LinkStatus;
+}
 interface ErrorMsg {
   type: "error";
   message: string;
 }
+
+type LinkStatus =
+  | { kind: "idle"; since: number }
+  | { kind: "thinking"; since: number }
+  | { kind: "tool"; toolName: string; since: number };
 
 type LinkMessage =
   | RegisterMsg
@@ -91,6 +102,7 @@ type LinkMessage =
   | ChatMsg
   | PromptRequestMsg
   | PromptResponseMsg
+  | StatusUpdateMsg
   | ErrorMsg;
 
 // ─── Extension ───────────────────────────────────────────────────────────────
@@ -108,14 +120,22 @@ export default function (pi: ExtensionAPI) {
   let terminalName = `t-${crypto.randomUUID().slice(0, 4)}`;
   let connectedTerminals: string[] = [];
   let ctx: ExtensionContext | undefined;
-  let isAgentBusy = false;
   let disposed = false;
   let manuallyDisconnected = false;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // Status tracking (local truth)
+  let agentRunning = false;
+  let activeToolName: string | null = null;
+  let stateSince = Date.now();
+  let lastPushedKind: string | null = null;
+  let lastPushedTool: string | null = null;
+  const terminalStatuses = new Map<string, LinkStatus>(); // other terminals
+
   // Hub state
   let wss: WebSocketServer | null = null;
   const hubClients = new Map<WebSocket, string>(); // ws → terminal name
+  const hubTerminalStatuses = new Map<string, LinkStatus>(); // hub-authoritative
 
   // Client state
   let ws: WebSocket | null = null;
@@ -146,6 +166,53 @@ export default function (pi: ExtensionAPI) {
         ? "link: offline"
         : `link: ${terminalName} (${role}) · ${count} terminal${count !== 1 ? "s" : ""}`;
     ctx.ui.setStatus("link", theme.fg("dim", info));
+  }
+
+  function deriveStatus(): LinkStatus {
+    if (activeToolName)
+      return { kind: "tool", toolName: activeToolName, since: stateSince };
+    if (agentRunning) return { kind: "thinking", since: stateSince };
+    return { kind: "idle", since: stateSince };
+  }
+
+  function pushStatus(force = false) {
+    if (role === "disconnected") return;
+    const status = deriveStatus();
+    const newKind = status.kind;
+    const newTool = status.kind === "tool" ? status.toolName : null;
+    if (!force && newKind === lastPushedKind && newTool === lastPushedTool)
+      return;
+    lastPushedKind = newKind;
+    lastPushedTool = newTool;
+    const msg: StatusUpdateMsg = {
+      type: "status_update",
+      name: terminalName,
+      status,
+    };
+    if (role === "hub") {
+      hubBroadcast(msg, terminalName);
+    } else if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(msg));
+    }
+  }
+
+  function formatDuration(since: number): string {
+    const sec = Math.floor((Date.now() - since) / 1000);
+    if (sec < 60) return `${sec}s`;
+    if (sec < 3600) return `${Math.floor(sec / 60)}m`;
+    return `${Math.floor(sec / 3600)}h`;
+  }
+
+  function formatStatus(s: LinkStatus): string {
+    const dur = formatDuration(s.since);
+    if (s.kind === "tool") return `tool:${s.toolName} (${dur})`;
+    return `${s.kind} (${dur})`;
+  }
+
+  function getStatusFor(name: string): LinkStatus | null {
+    if (name === terminalName) return deriveStatus();
+    const map = role === "hub" ? hubTerminalStatuses : terminalStatuses;
+    return map.get(name) ?? null;
   }
 
   function allTerminalNames(): Set<string> {
@@ -257,11 +324,18 @@ export default function (pi: ExtensionAPI) {
       case "welcome":
         terminalName = msg.name;
         connectedTerminals = msg.terminals;
+        terminalStatuses.clear();
+        if (msg.statuses) {
+          for (const [name, status] of Object.entries(msg.statuses)) {
+            terminalStatuses.set(name, status);
+          }
+        }
         updateStatus();
         ctx?.ui.notify(
           `Joined link as "${terminalName}" (${connectedTerminals.length} online)`,
           "info",
         );
+        pushStatus(true);
         break;
 
       // ── Directory updates ──
@@ -273,8 +347,14 @@ export default function (pi: ExtensionAPI) {
 
       case "terminal_left":
         connectedTerminals = msg.terminals;
+        terminalStatuses.delete(msg.name);
         updateStatus();
         ctx?.ui.notify(`"${msg.name}" left the link`, "info");
+        break;
+
+      // ── Status update from another terminal ──
+      case "status_update":
+        terminalStatuses.set(msg.name, msg.status);
         break;
 
       // ── Chat message ──
@@ -292,7 +372,7 @@ export default function (pi: ExtensionAPI) {
 
       // ── Another terminal asks us to run a prompt ──
       case "prompt_request":
-        if (isAgentBusy || pendingRemotePrompt) {
+        if (agentRunning || pendingRemotePrompt) {
           routeMessage({
             type: "prompt_response",
             id: msg.id,
@@ -353,12 +433,18 @@ export default function (pi: ExtensionAPI) {
         connectedTerminals = list;
         updateStatus();
 
-        // Confirm to the new client
+        // Confirm to the new client (include status snapshot)
+        const statuses: Record<string, LinkStatus> = {};
+        statuses[terminalName] = deriveStatus(); // hub's own status
+        for (const [name, status] of hubTerminalStatuses) {
+          if (name !== clientName) statuses[name] = status;
+        }
         clientWs.send(
           JSON.stringify({
             type: "welcome",
             name: clientName,
             terminals: list,
+            statuses,
           } satisfies WelcomeMsg),
         );
 
@@ -375,6 +461,21 @@ export default function (pi: ExtensionAPI) {
       // Ignore messages from unregistered clients
       if (!clientName) return;
 
+      // Status update — store and fan out to other clients only (not back to hub)
+      if (msg.type === "status_update") {
+        hubTerminalStatuses.set(clientName, msg.status);
+        const normalized: StatusUpdateMsg = {
+          type: "status_update",
+          name: clientName,
+          status: msg.status,
+        };
+        const json = JSON.stringify(normalized);
+        for (const [otherWs, name] of hubClients) {
+          if (name !== clientName) otherWs.send(json);
+        }
+        return;
+      }
+
       // Route chat / prompt messages
       if (
         msg.type === "chat" ||
@@ -388,6 +489,7 @@ export default function (pi: ExtensionAPI) {
     clientWs.on("close", () => {
       if (clientName) {
         hubClients.delete(clientWs);
+        hubTerminalStatuses.delete(clientName);
         const list = terminalList();
         connectedTerminals = list;
         updateStatus();
@@ -545,6 +647,10 @@ export default function (pi: ExtensionAPI) {
 
     role = "disconnected";
     connectedTerminals = [];
+    terminalStatuses.clear();
+    hubTerminalStatuses.clear();
+    lastPushedKind = null;
+    lastPushedTool = null;
     updateStatus();
   }
 
@@ -565,11 +671,29 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("agent_start", async () => {
-    isAgentBusy = true;
+    agentRunning = true;
+    activeToolName = null;
+    stateSince = Date.now();
+    pushStatus();
+  });
+
+  pi.on("tool_execution_start", async (event) => {
+    activeToolName = event.toolName;
+    stateSince = Date.now();
+    pushStatus();
+  });
+
+  pi.on("tool_execution_end", async () => {
+    activeToolName = null;
+    if (agentRunning) stateSince = Date.now();
+    pushStatus();
   });
 
   pi.on("agent_end", async (event) => {
-    isAgentBusy = false;
+    agentRunning = false;
+    activeToolName = null;
+    stateSince = Date.now();
+    pushStatus();
 
     // If we were running a remote prompt, send the response back
     if (pendingRemotePrompt) {
@@ -806,15 +930,20 @@ export default function (pi: ExtensionAPI) {
     async execute() {
       if (role === "disconnected") return notConnectedResult();
 
+      const statuses: Record<string, string> = {};
       const list = connectedTerminals
         .map((name) => {
+          const status = getStatusFor(name);
+          const statusStr = status ? formatStatus(status) : "";
+          if (statusStr) statuses[name] = statusStr;
           const marker = name === terminalName ? " (you)" : "";
-          return `  • ${name}${marker}`;
+          return `  • ${name}${marker}${statusStr ? "  " + statusStr : ""}`;
         })
         .join("\n");
 
       return textResult(`Connected terminals:\n${list}`, {
         terminals: connectedTerminals,
+        statuses,
         self: terminalName,
         role,
       });
@@ -822,7 +951,12 @@ export default function (pi: ExtensionAPI) {
 
     renderResult(result, _options, theme) {
       const details = result.details as
-        | { terminals?: string[]; self?: string; role?: string }
+        | {
+            terminals?: string[];
+            statuses?: Record<string, string>;
+            self?: string;
+            role?: string;
+          }
         | undefined;
       if (!details?.terminals) {
         const txt = result.content[0];
@@ -834,11 +968,12 @@ export default function (pi: ExtensionAPI) {
       text += theme.fg("accent", `${details.terminals.length} terminal(s)`);
       for (const name of details.terminals) {
         const isSelf = name === details.self;
+        const status = details.statuses?.[name] ?? "";
+        const nameStr = isSelf ? `• ${name} (you)` : `• ${name}`;
         text +=
           "\n  " +
-          (isSelf
-            ? theme.fg("accent", `• ${name} (you)`)
-            : theme.fg("text", `• ${name}`));
+          (isSelf ? theme.fg("accent", nameStr) : theme.fg("text", nameStr)) +
+          (status ? "  " + theme.fg("dim", status) : "");
       }
       return new Text(text, 0, 0);
     },
@@ -853,9 +988,14 @@ export default function (pi: ExtensionAPI) {
         _ctx.ui.notify("Link: not connected", "warning");
         return;
       }
-      const names = connectedTerminals.join(", ");
+      const lines = connectedTerminals.map((name) => {
+        const status = getStatusFor(name);
+        const statusStr = status ? formatStatus(status) : "";
+        const marker = name === terminalName ? " (you)" : "";
+        return `${name}${marker}${statusStr ? ": " + statusStr : ""}`;
+      });
       _ctx.ui.notify(
-        `Link: ${terminalName} (${role}) · ${connectedTerminals.length} online: ${names}`,
+        `Link: ${terminalName} (${role}) · ${connectedTerminals.length} online\n${lines.join("\n")}`,
         "info",
       );
     },
@@ -905,6 +1045,7 @@ export default function (pi: ExtensionAPI) {
           { type: "terminal_joined", name: newName, terminals: list },
           newName,
         );
+        pushStatus(true);
         _ctx.ui.notify(`Renamed to "${newName}"`, "info");
       } else if (role === "client") {
         // Reconnect with new name — hub will enforce uniqueness via register
