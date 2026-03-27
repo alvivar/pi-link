@@ -209,13 +209,13 @@ link (hub) 3 terminal(s)
 
 ## Slash Commands
 
-| Command                 | Purpose                                                                                                  |
-| ----------------------- | -------------------------------------------------------------------------------------------------------- |
-| `/link`                 | Show link status (name, role, online count, agent status per terminal)                                   |
-| `/link-name [name]`     | Rename this terminal. With no argument, adopts the current Pi session name if available. Collision-safe. |
-| `/link-broadcast <msg>` | Broadcast a chat message to all other terminals                                                          |
-| `/link-connect`         | Connect to Pi Link (works anytime, with or without `--link`)                                             |
-| `/link-disconnect`      | Disconnect from Pi Link and suppress auto-reconnect (overrides `--link`)                                 |
+| Command                 | Purpose                                                                                                                  |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `/link`                 | Show link status (name, role, online count, agent status per terminal)                                                   |
+| `/link-name [name]`     | Rename and save as this session's preferred link name. With no argument, adopts the Pi session name. Restored on resume. |
+| `/link-broadcast <msg>` | Broadcast a chat message to all other terminals                                                                          |
+| `/link-connect`         | Connect to Pi Link (works anytime, with or without `--link`)                                                             |
+| `/link-disconnect`      | Disconnect from Pi Link and suppress auto-reconnect (overrides `--link`)                                                 |
 
 ### Examples
 
@@ -242,6 +242,8 @@ link (hub) 3 terminal(s)
 ✓ Joined Pi Link as "orchestrator" (3 online)    ... or ...
 ✓ Pi Link hub started on :9900 as "orchestrator" ... if no hub exists
 ```
+
+**Name persistence:** `/link-name` saves your preferred name to the session. Resume that session later and your name is restored automatically. If the name is taken, the hub assigns a variant (e.g., `"builder-2"`), but your preferred name stays saved — the next reconnect retries it. Both `/link-name builder` and `/link-name` (no args) count as explicit saves; hub-assigned variants like `"builder-2"` are never persisted.
 
 See [Configuration](#configuration) for details on `--link`, `/link-connect`, and `/link-disconnect` behavior.
 
@@ -439,11 +441,13 @@ Client A            Hub              Client B
   |<-----------------|                  |
 ```
 
-### Name Uniqueness
+### Name Uniqueness & Persistence
 
 The hub enforces unique terminal names via a `uniqueName()` function. If `"builder"` is already taken, the next terminal requesting that name is assigned `"builder-2"`, then `"builder-3"`, and so on.
 
 Default names are random 4-character hex IDs: `t-a1b2`, `t-c3d4`, etc.
+
+**Persistence:** `/link-name` saves the preferred name to the session via `pi.appendEntry("link-name", { name })`. On session resume, the saved name is restored and requested from the hub. Only explicit `/link-name` calls persist — hub-assigned variants like `"builder-2"` are not saved. On reconnect, the terminal always requests the preferred name, not the last runtime name.
 
 **Rename guards:**
 

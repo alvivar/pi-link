@@ -118,6 +118,7 @@ export default function (pi: ExtensionAPI) {
 
   let role: "hub" | "client" | "disconnected" = "disconnected";
   let terminalName = `t-${crypto.randomUUID().slice(0, 4)}`;
+  let preferredName: string | null = null;
   let connectedTerminals: string[] = [];
   let ctx: ExtensionContext | undefined;
   let disposed = false;
@@ -540,20 +541,20 @@ export default function (pi: ExtensionAPI) {
 
   // ── Connect as client ────────────────────────────────────────────────────
 
-  function connectAsClient(port: number): Promise<boolean> {
+  function connectAsClient(): Promise<boolean> {
     return new Promise((resolve) => {
-      const socket = new WebSocket(`ws://127.0.0.1:${port}`);
+      const socket = new WebSocket(`ws://127.0.0.1:${DEFAULT_PORT}`);
       let resolved = false;
 
       socket.on("open", () => {
         ws = socket;
         role = "client";
         resolved = true;
-        // Register with the hub
+        // Register with preferred name if available, otherwise current name
         socket.send(
           JSON.stringify({
             type: "register",
-            name: terminalName,
+            name: preferredName ?? terminalName,
           } satisfies RegisterMsg),
         );
         resolve(true);
@@ -594,7 +595,7 @@ export default function (pi: ExtensionAPI) {
     if (disposed) return;
 
     // Try connecting to an existing hub
-    if (await connectAsClient(DEFAULT_PORT)) return;
+    if (await connectAsClient()) return;
 
     // No hub found — become the hub
     if (await startHub()) return;
@@ -663,11 +664,82 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, _ctx) => {
     ctx = _ctx;
+
+    // Restore preferred link name from session
+    const saved = _ctx.sessionManager
+      .getEntries()
+      .filter(
+        (e: { type: string; customType?: string }) =>
+          e.type === "custom" && e.customType === "link-name",
+      )
+      .pop() as { data?: { name?: string } } | undefined;
+    if (saved?.data?.name) {
+      preferredName = saved.data.name;
+      terminalName = preferredName;
+    }
+
     if (pi.getFlag("link") === true) await initialize();
   });
 
   pi.on("session_shutdown", async () => {
     cleanup();
+  });
+
+  pi.on("session_switch", async (_event, _ctx) => {
+    ctx = _ctx;
+
+    // Restore preferred name from the new session
+    const saved = _ctx.sessionManager
+      .getEntries()
+      .filter(
+        (e: { type: string; customType?: string }) =>
+          e.type === "custom" && e.customType === "link-name",
+      )
+      .pop() as { data?: { name?: string } } | undefined;
+
+    preferredName = saved?.data?.name ?? null;
+    const desiredName = preferredName ?? `t-${crypto.randomUUID().slice(0, 4)}`;
+
+    if (desiredName === terminalName) return; // no identity change needed
+
+    if (role === "hub") {
+      // Hub rename in-place — avoid tearing down the server
+      const takenByOther = Array.from(hubClients.values()).includes(
+        desiredName,
+      );
+      if (takenByOther) {
+        // Can't use preferred name — keep current identity
+        ctx?.ui.notify(
+          `Session preferred name "${desiredName}" is taken, keeping "${terminalName}"`,
+          "warning",
+        );
+        return;
+      }
+      const old = terminalName;
+      terminalName = desiredName;
+      const list = terminalList();
+      connectedTerminals = list;
+      updateStatus();
+      // Notify clients only — hub already updated local state
+      hubBroadcast(
+        { type: "terminal_left", name: old, terminals: list },
+        terminalName,
+      );
+      hubBroadcast(
+        { type: "terminal_joined", name: desiredName, terminals: list },
+        terminalName,
+      );
+      pushStatus(true);
+    } else if (role === "client") {
+      // Client — disconnect and reconnect with new name
+      terminalName = desiredName;
+      disconnect();
+      manuallyDisconnected = false;
+      await initialize();
+    } else {
+      // Disconnected — just update local name
+      terminalName = desiredName;
+    }
   });
 
   pi.on("agent_start", async () => {
@@ -835,6 +907,13 @@ export default function (pi: ExtensionAPI) {
 
     async execute(_toolCallId, params, signal) {
       if (role === "disconnected") return notConnectedResult();
+
+      if (!connectedTerminals.includes(params.to)) {
+        return textResult(
+          `Terminal "${params.to}" not found. Connected: ${connectedTerminals.join(", ")}`,
+          { to: params.to, error: "not_found" },
+        );
+      }
 
       const requestId = crypto.randomUUID();
 
@@ -1019,12 +1098,23 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
-      if (newName === terminalName) {
+      if (newName === terminalName && newName === preferredName) {
         _ctx.ui.notify(`Already using "${newName}"`, "info");
         return;
       }
 
-      // If we're the hub, check uniqueness before renaming
+      function savePreference() {
+        preferredName = newName;
+        pi.appendEntry("link-name", { name: preferredName });
+      }
+
+      if (newName === terminalName) {
+        savePreference();
+        _ctx.ui.notify(`Saved "${newName}" as preferred link name`, "info");
+        return;
+      }
+
+      // If we're the hub, check uniqueness before persisting
       if (role === "hub") {
         // Check if name is taken by another terminal
         const takenByOther = Array.from(hubClients.values()).includes(newName);
@@ -1040,15 +1130,21 @@ export default function (pi: ExtensionAPI) {
         const list = terminalList();
         connectedTerminals = list;
         updateStatus();
-        hubBroadcast({ type: "terminal_left", name: old, terminals: list });
+        // Notify clients only — hub already updated local state
+        hubBroadcast(
+          { type: "terminal_left", name: old, terminals: list },
+          terminalName,
+        );
         hubBroadcast(
           { type: "terminal_joined", name: newName, terminals: list },
-          newName,
+          terminalName,
         );
         pushStatus(true);
+        savePreference();
         _ctx.ui.notify(`Renamed to "${newName}"`, "info");
       } else if (role === "client") {
         // Reconnect with new name — hub will enforce uniqueness via register
+        savePreference();
         terminalName = newName;
         ws?.close();
         // Reconnect will happen via the onClose handler → scheduleReconnect
@@ -1057,6 +1153,7 @@ export default function (pi: ExtensionAPI) {
           "info",
         );
       } else {
+        savePreference();
         terminalName = newName;
         _ctx.ui.notify(`Name set to "${newName}" (not connected)`, "info");
       }
