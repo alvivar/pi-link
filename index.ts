@@ -2,21 +2,12 @@
  * Pi Link — WebSocket-based inter-terminal communication
  *
  * Connects multiple Pi terminals over a local WebSocket link.
- * The first terminal becomes the hub (server); others join as clients.
- * If the hub exits, a surviving terminal promotes itself automatically.
+ * Opt-in via --link flag or /link-connect command.
+ * First terminal to connect becomes the hub; others join as clients.
+ * Hub loss triggers automatic promotion of a surviving client.
  *
- * Features:
- *   - Auto-discovery: try to connect → fall back to becoming the hub
- *   - Named terminals with uniqueness enforcement
- *   - LLM tools: link_send (chat), link_prompt (remote prompt + response), link_list
- *   - Commands: /link, /link-name, /link-broadcast, /link-connect, /link-disconnect
- *   - Custom message renderer for incoming link messages
- *   - Auto-reconnect with hub promotion on disconnect
- *
- * Install:
- *   cd ~/.pi/agent/extensions/pi-link && npm install
- *
- * Then just start two or more `pi` terminals — they discover each other.
+ * Tools: link_send, link_prompt, link_list
+ * Commands: /link, /link-name, /link-broadcast, /link-connect, /link-disconnect
  */
 
 import type {
@@ -26,6 +17,7 @@ import type {
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import * as crypto from "node:crypto";
+import * as os from "node:os";
 
 import { WebSocket, WebSocketServer } from "ws";
 
@@ -42,17 +34,25 @@ const KEEPALIVE_INTERVAL_MS = 30_000;
 interface RegisterMsg {
   type: "register";
   name: string;
+  cwd?: string;
 }
 interface WelcomeMsg {
   type: "welcome";
   name: string;
   terminals: string[];
   statuses?: Record<string, LinkStatus>;
+  cwds?: Record<string, string>;
 }
 interface TerminalJoinedMsg {
   type: "terminal_joined";
   name: string;
   terminals: string[];
+  cwd?: string;
+}
+interface CwdUpdateMsg {
+  type: "cwd_update";
+  name: string;
+  cwd: string;
 }
 interface TerminalLeftMsg {
   type: "terminal_left";
@@ -105,6 +105,7 @@ type LinkMessage =
   | PromptRequestMsg
   | PromptResponseMsg
   | StatusUpdateMsg
+  | CwdUpdateMsg
   | ErrorMsg;
 
 // ─── Extension ───────────────────────────────────────────────────────────────
@@ -134,11 +135,14 @@ export default function (pi: ExtensionAPI) {
   let lastPushedKind: string | null = null;
   let lastPushedTool: string | null = null;
   const terminalStatuses = new Map<string, LinkStatus>(); // other terminals
+  let currentCwd = "";
+  const terminalCwds = new Map<string, string>(); // other terminals' cwds
 
   // Hub state
   let wss: WebSocketServer | null = null;
   const hubClients = new Map<WebSocket, string>(); // ws → terminal name
   const hubTerminalStatuses = new Map<string, LinkStatus>(); // hub-authoritative
+  const hubTerminalCwds = new Map<string, string>(); // hub-authoritative (excludes self)
 
   // Client state
   let ws: WebSocket | null = null;
@@ -219,6 +223,34 @@ export default function (pi: ExtensionAPI) {
     if (name === terminalName) return deriveStatus();
     const map = role === "hub" ? hubTerminalStatuses : terminalStatuses;
     return map.get(name) ?? null;
+  }
+
+  function getCwdFor(name: string): string | null {
+    if (name === terminalName) return currentCwd || null;
+    if (role === "hub") return hubTerminalCwds.get(name) ?? null;
+    return terminalCwds.get(name) ?? null;
+  }
+
+  function shortenPath(cwd: string): string {
+    const home = os.homedir().replace(/\\/g, "/");
+    const normalized = cwd.replace(/\\/g, "/");
+    if (normalized === home) return "~";
+    if (normalized.startsWith(home + "/"))
+      return "~" + normalized.slice(home.length);
+    return normalized;
+  }
+
+  function pushCwdUpdate() {
+    const msg: CwdUpdateMsg = {
+      type: "cwd_update",
+      name: terminalName,
+      cwd: currentCwd,
+    };
+    if (role === "hub") {
+      hubBroadcast(msg, terminalName);
+    } else if (role === "client" && ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(msg));
+    }
   }
 
   // ── Pending prompt helpers ───────────────────────────────────────────────
@@ -365,9 +397,15 @@ export default function (pi: ExtensionAPI) {
         terminalName = msg.name;
         connectedTerminals = msg.terminals;
         terminalStatuses.clear();
+        terminalCwds.clear();
         if (msg.statuses) {
           for (const [name, status] of Object.entries(msg.statuses)) {
             terminalStatuses.set(name, status);
+          }
+        }
+        if (msg.cwds) {
+          for (const [name, cwd] of Object.entries(msg.cwds)) {
+            terminalCwds.set(name, cwd);
           }
         }
         updateStatus();
@@ -378,9 +416,10 @@ export default function (pi: ExtensionAPI) {
         pushStatus(true);
         break;
 
-      // ── Directory updates ──
+      // ── Membership updates ──
       case "terminal_joined":
         connectedTerminals = msg.terminals;
+        if (role !== "hub" && msg.cwd) terminalCwds.set(msg.name, msg.cwd);
         updateStatus();
         ctx?.ui.notify(`"${msg.name}" joined the link`, "info");
         break;
@@ -388,6 +427,7 @@ export default function (pi: ExtensionAPI) {
       case "terminal_left":
         connectedTerminals = msg.terminals;
         terminalStatuses.delete(msg.name);
+        if (role !== "hub") terminalCwds.delete(msg.name);
         // Fail any pending prompts to the departed terminal immediately
         for (const [id, pending] of pendingPromptResponses) {
           if (pending.targetName === msg.name) {
@@ -410,6 +450,10 @@ export default function (pi: ExtensionAPI) {
       case "status_update":
         terminalStatuses.set(msg.name, msg.status);
         resetInactivityFor(msg.name);
+        break;
+
+      case "cwd_update":
+        terminalCwds.set(msg.name, msg.cwd);
         break;
 
       // ── Chat message ──
@@ -488,15 +532,21 @@ export default function (pi: ExtensionAPI) {
       if (msg.type === "register") {
         clientName = uniqueName(msg.name);
         hubClients.set(clientWs, clientName);
+        if (msg.cwd) hubTerminalCwds.set(clientName, msg.cwd);
         const list = terminalList();
         connectedTerminals = list;
         updateStatus();
 
-        // Confirm to the new client (include status snapshot)
+        // Confirm to the new client (include status + cwd snapshots)
         const statuses: Record<string, LinkStatus> = {};
         statuses[terminalName] = deriveStatus(); // hub's own status
         for (const [name, status] of hubTerminalStatuses) {
           if (name !== clientName) statuses[name] = status;
+        }
+        const cwds: Record<string, string> = {};
+        if (currentCwd) cwds[terminalName] = currentCwd; // hub's own cwd
+        for (const [name, cwd] of hubTerminalCwds) {
+          if (name !== clientName) cwds[name] = cwd;
         }
         clientWs.send(
           JSON.stringify({
@@ -504,14 +554,16 @@ export default function (pi: ExtensionAPI) {
             name: clientName,
             terminals: list,
             statuses,
+            cwds,
           } satisfies WelcomeMsg),
         );
 
-        // Notify everyone else
+        // Notify everyone else (include joiner's cwd)
         const joined: TerminalJoinedMsg = {
           type: "terminal_joined",
           name: clientName,
           terminals: list,
+          cwd: msg.cwd,
         };
         hubBroadcast(joined, clientName);
         return;
@@ -536,6 +588,21 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
+      // Cwd update — store and relay to other clients only
+      if (msg.type === "cwd_update") {
+        hubTerminalCwds.set(clientName, msg.cwd);
+        const normalized: CwdUpdateMsg = {
+          type: "cwd_update",
+          name: clientName,
+          cwd: msg.cwd,
+        };
+        const json = JSON.stringify(normalized);
+        for (const [otherWs, name] of hubClients) {
+          if (name !== clientName) otherWs.send(json);
+        }
+        return;
+      }
+
       // Route chat / prompt messages
       if (
         msg.type === "chat" ||
@@ -550,6 +617,7 @@ export default function (pi: ExtensionAPI) {
       if (clientName) {
         hubClients.delete(clientWs);
         hubTerminalStatuses.delete(clientName);
+        hubTerminalCwds.delete(clientName);
         const list = terminalList();
         connectedTerminals = list;
         updateStatus();
@@ -614,6 +682,7 @@ export default function (pi: ExtensionAPI) {
           JSON.stringify({
             type: "register",
             name: preferredName ?? terminalName,
+            cwd: currentCwd || undefined,
           } satisfies RegisterMsg),
         );
         resolve(true);
@@ -717,6 +786,8 @@ export default function (pi: ExtensionAPI) {
     connectedTerminals = [];
     terminalStatuses.clear();
     hubTerminalStatuses.clear();
+    terminalCwds.clear();
+    hubTerminalCwds.clear();
     lastPushedKind = null;
     lastPushedTool = null;
     updateStatus();
@@ -731,6 +802,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, _ctx) => {
     ctx = _ctx;
+    currentCwd = _ctx.cwd;
 
     // Restore preferred link name from session
     const saved = _ctx.sessionManager
@@ -755,7 +827,12 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_switch", async (_event, _ctx) => {
     ctx = _ctx;
 
-    // Restore preferred name from the new session
+    // 1. Cwd change detection (always, before any name logic)
+    const newCwd = _ctx.cwd;
+    const cwdChanged = newCwd !== currentCwd;
+    if (cwdChanged) currentCwd = newCwd;
+
+    // 2. Restore preferred name from the new session
     const saved = _ctx.sessionManager
       .getEntries()
       .filter(
@@ -766,9 +843,17 @@ export default function (pi: ExtensionAPI) {
 
     preferredName = saved?.data?.name ?? null;
     const desiredName = preferredName ?? `t-${crypto.randomUUID().slice(0, 4)}`;
+    const nameChanged = desiredName !== terminalName;
 
-    if (desiredName === terminalName) return; // no identity change needed
+    if (!nameChanged && !cwdChanged) return; // nothing to do
 
+    if (!nameChanged) {
+      // Name stayed the same, but cwd changed — push cwd update
+      pushCwdUpdate();
+      return;
+    }
+
+    // Name changed (cwd may or may not have changed too)
     if (role === "hub") {
       // Hub rename in-place — avoid tearing down the server
       const takenByOther = Array.from(hubClients.values()).includes(
@@ -780,6 +865,8 @@ export default function (pi: ExtensionAPI) {
           `Session preferred name "${desiredName}" is taken, keeping "${terminalName}"`,
           "warning",
         );
+        // Still push cwd update under current name if cwd changed
+        if (cwdChanged) pushCwdUpdate();
         return;
       }
       const old = terminalName;
@@ -793,12 +880,17 @@ export default function (pi: ExtensionAPI) {
         terminalName,
       );
       hubBroadcast(
-        { type: "terminal_joined", name: desiredName, terminals: list },
+        {
+          type: "terminal_joined",
+          name: desiredName,
+          terminals: list,
+          cwd: currentCwd,
+        },
         terminalName,
       );
       pushStatus(true);
     } else if (role === "client") {
-      // Client — disconnect and reconnect with new name
+      // Client — disconnect and reconnect with new name (register includes cwd)
       terminalName = desiredName;
       disconnect();
       manuallyDisconnected = false;
@@ -1099,19 +1191,25 @@ export default function (pi: ExtensionAPI) {
       if (role === "disconnected") return notConnectedResult();
 
       const statuses: Record<string, string> = {};
+      const cwds: Record<string, string> = {};
       const list = connectedTerminals
         .map((name) => {
           const status = getStatusFor(name);
           const statusStr = status ? formatStatus(status) : "";
           if (statusStr) statuses[name] = statusStr;
+          const cwd = getCwdFor(name);
+          if (cwd) cwds[name] = cwd;
           const marker = name === terminalName ? " (you)" : "";
-          return `  • ${name}${marker}${statusStr ? "  " + statusStr : ""}`;
+          let line = `  \u2022 ${name}${marker}${statusStr ? "  " + statusStr : ""}`;
+          if (cwd) line += `\n    cwd: ${cwd}`;
+          return line;
         })
         .join("\n");
 
       return textResult(`Connected terminals:\n${list}`, {
         terminals: connectedTerminals,
         statuses,
+        cwds,
         self: terminalName,
         role,
       });
@@ -1122,6 +1220,7 @@ export default function (pi: ExtensionAPI) {
         | {
             terminals?: string[];
             statuses?: Record<string, string>;
+            cwds?: Record<string, string>;
             self?: string;
             role?: string;
           }
@@ -1137,11 +1236,13 @@ export default function (pi: ExtensionAPI) {
       for (const name of details.terminals) {
         const isSelf = name === details.self;
         const status = details.statuses?.[name] ?? "";
-        const nameStr = isSelf ? `• ${name} (you)` : `• ${name}`;
+        const cwd = details.cwds?.[name];
+        const nameStr = isSelf ? `\u2022 ${name} (you)` : `\u2022 ${name}`;
         text +=
           "\n  " +
           (isSelf ? theme.fg("accent", nameStr) : theme.fg("text", nameStr)) +
           (status ? "  " + theme.fg("dim", status) : "");
+        if (cwd) text += "\n    " + theme.fg("dim", `cwd: ${shortenPath(cwd)}`);
       }
       return new Text(text, 0, 0);
     },
@@ -1159,8 +1260,11 @@ export default function (pi: ExtensionAPI) {
       const lines = connectedTerminals.map((name) => {
         const status = getStatusFor(name);
         const statusStr = status ? formatStatus(status) : "";
+        const cwd = getCwdFor(name);
         const marker = name === terminalName ? " (you)" : "";
-        return `${name}${marker}${statusStr ? ": " + statusStr : ""}`;
+        let line = `${name}${marker}${statusStr ? ": " + statusStr : ""}`;
+        if (cwd) line += `\n  cwd: ${shortenPath(cwd)}`;
+        return line;
       });
       _ctx.ui.notify(
         `Link: ${terminalName} (${role}) · ${connectedTerminals.length} online\n${lines.join("\n")}`,
@@ -1225,7 +1329,12 @@ export default function (pi: ExtensionAPI) {
           terminalName,
         );
         hubBroadcast(
-          { type: "terminal_joined", name: newName, terminals: list },
+          {
+            type: "terminal_joined",
+            name: newName,
+            terminals: list,
+            cwd: currentCwd,
+          },
           terminalName,
         );
         pushStatus(true);

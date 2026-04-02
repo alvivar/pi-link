@@ -2,7 +2,17 @@
 
 All notable changes to pi-link are documented here.
 
-This changelog is based on the git history from `2026-03-21` (initial commit as `pi-mesh`) through `2026-03-30` (current). Versions correspond to npm publishes.
+This changelog is based on the git history from `2026-03-21` through `2026-04-02` (current). Versions correspond to npm publishes.
+
+---
+
+## 0.1.5 — 2026-04-02
+
+### Added
+
+- **Working directory sharing.** Each terminal reports its `cwd` on connect and on session switch. New `cwd_update` protocol message (10th message type) broadcasts mid-session directory changes. `link_list` and `/link` now show per-terminal working directories — full absolute paths in tool output, `~/…` shortened in the TUI. Agents can use this to choose the right target, use explicit paths when terminals differ, and catch wrong-project mistakes early.
+
+- **Header comment cleanup.** Simplified the top-of-file doc comment — removed feature bullet list and install instructions in favor of a concise summary.
 
 ---
 
