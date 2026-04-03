@@ -2,7 +2,21 @@
 
 All notable changes to pi-link are documented here.
 
-This changelog is based on the git history from `2026-03-21` through `2026-04-02` (current). Versions correspond to npm publishes.
+This changelog is based on the git history from `2026-03-21` through `2026-04-03` (current). Versions correspond to npm publishes.
+
+---
+
+## 0.1.6 — 2026-04-03
+
+### Added
+
+- **Persistent connection intent.** `/link-connect` and `/link-disconnect` now save their state to the session via `pi.appendEntry("link-active", ...)`. On `session_start`, the saved preference is checked before falling back to `--link`. Connect once and it stays connected across session resumes without needing the flag.
+
+### Removed
+
+- **`cwd_update` message type.** Working directories are now only reported on connect (via `register`/`welcome`), not mid-session. Protocol returns to 9 message types.
+
+- **`session_switch` handler.** Removed the session-switch logic that handled name and cwd changes on `/resume`. Simplifies the lifecycle.
 
 ---
 

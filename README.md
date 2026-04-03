@@ -191,7 +191,7 @@ Send a prompt to a remote terminal and **wait** for the LLM's response (synchron
 
 Lists all connected terminals with role info, live agent status, working directory, and self-identification. Takes no parameters.
 
-Each terminal reports its current working directory on connect and on session switch. `link_list` shows the full absolute path so agents can choose the right target, use explicit paths when terminals differ, and catch wrong-project mistakes early.
+Each terminal reports its current working directory on connect. `link_list` shows the full absolute path so agents can choose the right target, use explicit paths when terminals differ, and catch wrong-project mistakes early.
 
 Each terminal's status is derived automatically from Pi lifecycle events — agents can't set it manually. Three states:
 
@@ -397,7 +397,7 @@ The `pi.extensions` field tells Pi which files to load as extensions. Here it po
 
 ### Protocol
 
-The wire protocol consists of **10 message types**, all serialized as JSON over WebSocket frames. New cwd-related fields are optional for backward compatibility.
+The wire protocol consists of **9 message types**, all serialized as JSON over WebSocket frames. Cwd-related fields are optional for backward compatibility.
 
 | Type              | Direction       | Purpose                                                                 |
 | ----------------- | --------------- | ----------------------------------------------------------------------- |
@@ -409,7 +409,6 @@ The wire protocol consists of **10 message types**, all serialized as JSON over 
 | `prompt_request`  | Any → Any       | Request a remote terminal to execute a prompt                           |
 | `prompt_response` | Any → Any       | Response carrying the remote prompt result                              |
 | `status_update`   | Any → Hub → All | Terminal broadcasts its agent status change                             |
-| `cwd_update`      | Any → Hub → All | Terminal broadcasts a cwd change                                        |
 | `error`           | Hub → Client    | Error notification                                                      |
 
 ### Message Flow Examples
@@ -429,7 +428,7 @@ Client                         Hub
   |                             |
 ```
 
-Hub then broadcasts `terminal_joined` to the other connected terminals. The `welcome` message includes status and cwd snapshots for all connected terminals (fields omitted above for brevity). `terminal_joined` also includes the new terminal's optional cwd, and mid-session cwd changes are distributed via `cwd_update`.
+Hub then broadcasts `terminal_joined` to the other connected terminals. The `welcome` message includes status and cwd snapshots for all connected terminals (fields omitted above for brevity). `terminal_joined` also includes the new terminal's optional cwd.
 
 **Sending a chat message:**
 
@@ -482,7 +481,7 @@ Default names are random 4-character hex IDs: `t-a1b2`, `t-c3d4`, etc.
 | `agentRunning`           | `boolean`                             | Whether an agent run is active; blocks incoming remote prompts                              |
 | `activeToolName`         | `string \| null`                      | Name of the currently executing tool (drives `tool:<name>` status)                          |
 | `stateSince`             | `number`                              | Timestamp of last status change (used for duration display)                                 |
-| `currentCwd`             | `string`                              | Current working directory reported to peers on connect and session switch                   |
+| `currentCwd`             | `string`                              | Current working directory reported to peers on connect                                      |
 | `manuallyDisconnected`   | `boolean`                             | Set by `/link-disconnect`; suppresses auto-reconnect                                        |
 | `pendingRemotePrompt`    | `object \| null`                      | Tracks the single in-flight remote prompt execution                                         |
 | `pendingPromptResponses` | `Map`                                 | Outstanding prompt RPCs awaiting responses (includes inactivity + ceiling timers per entry) |

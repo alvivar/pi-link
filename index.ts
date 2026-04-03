@@ -49,11 +49,6 @@ interface TerminalJoinedMsg {
   terminals: string[];
   cwd?: string;
 }
-interface CwdUpdateMsg {
-  type: "cwd_update";
-  name: string;
-  cwd: string;
-}
 interface TerminalLeftMsg {
   type: "terminal_left";
   name: string;
@@ -105,7 +100,6 @@ type LinkMessage =
   | PromptRequestMsg
   | PromptResponseMsg
   | StatusUpdateMsg
-  | CwdUpdateMsg
   | ErrorMsg;
 
 // ─── Extension ───────────────────────────────────────────────────────────────
@@ -240,17 +234,18 @@ export default function (pi: ExtensionAPI) {
     return normalized;
   }
 
-  function pushCwdUpdate() {
-    const msg: CwdUpdateMsg = {
-      type: "cwd_update",
-      name: terminalName,
-      cwd: currentCwd,
-    };
-    if (role === "hub") {
-      hubBroadcast(msg, terminalName);
-    } else if (role === "client" && ws?.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(msg));
-    }
+  // ── Connection intent ──────────────────────────────────────────────────
+
+  function shouldConnect(_ctx: ExtensionContext): boolean {
+    const saved = _ctx.sessionManager
+      .getEntries()
+      .filter(
+        (e: { type: string; customType?: string }) =>
+          e.type === "custom" && e.customType === "link-active",
+      )
+      .pop() as { data?: { active?: boolean } } | undefined;
+    if (saved?.data?.active !== undefined) return saved.data.active;
+    return pi.getFlag("link") === true;
   }
 
   // ── Pending prompt helpers ───────────────────────────────────────────────
@@ -452,10 +447,6 @@ export default function (pi: ExtensionAPI) {
         resetInactivityFor(msg.name);
         break;
 
-      case "cwd_update":
-        terminalCwds.set(msg.name, msg.cwd);
-        break;
-
       // ── Chat message ──
       case "chat":
         pi.sendMessage(
@@ -580,21 +571,6 @@ export default function (pi: ExtensionAPI) {
           type: "status_update",
           name: clientName,
           status: msg.status,
-        };
-        const json = JSON.stringify(normalized);
-        for (const [otherWs, name] of hubClients) {
-          if (name !== clientName) otherWs.send(json);
-        }
-        return;
-      }
-
-      // Cwd update — store and relay to other clients only
-      if (msg.type === "cwd_update") {
-        hubTerminalCwds.set(clientName, msg.cwd);
-        const normalized: CwdUpdateMsg = {
-          type: "cwd_update",
-          name: clientName,
-          cwd: msg.cwd,
         };
         const json = JSON.stringify(normalized);
         for (const [otherWs, name] of hubClients) {
@@ -817,88 +793,11 @@ export default function (pi: ExtensionAPI) {
       terminalName = preferredName;
     }
 
-    if (pi.getFlag("link") === true) await initialize();
+    if (shouldConnect(_ctx)) await initialize();
   });
 
   pi.on("session_shutdown", async () => {
     cleanup();
-  });
-
-  pi.on("session_switch", async (_event, _ctx) => {
-    ctx = _ctx;
-
-    // 1. Cwd change detection (always, before any name logic)
-    const newCwd = _ctx.cwd;
-    const cwdChanged = newCwd !== currentCwd;
-    if (cwdChanged) currentCwd = newCwd;
-
-    // 2. Restore preferred name from the new session
-    const saved = _ctx.sessionManager
-      .getEntries()
-      .filter(
-        (e: { type: string; customType?: string }) =>
-          e.type === "custom" && e.customType === "link-name",
-      )
-      .pop() as { data?: { name?: string } } | undefined;
-
-    preferredName = saved?.data?.name ?? null;
-    const desiredName = preferredName ?? `t-${crypto.randomUUID().slice(0, 4)}`;
-    const nameChanged = desiredName !== terminalName;
-
-    if (!nameChanged && !cwdChanged) return; // nothing to do
-
-    if (!nameChanged) {
-      // Name stayed the same, but cwd changed — push cwd update
-      pushCwdUpdate();
-      return;
-    }
-
-    // Name changed (cwd may or may not have changed too)
-    if (role === "hub") {
-      // Hub rename in-place — avoid tearing down the server
-      const takenByOther = Array.from(hubClients.values()).includes(
-        desiredName,
-      );
-      if (takenByOther) {
-        // Can't use preferred name — keep current identity
-        ctx?.ui.notify(
-          `Session preferred name "${desiredName}" is taken, keeping "${terminalName}"`,
-          "warning",
-        );
-        // Still push cwd update under current name if cwd changed
-        if (cwdChanged) pushCwdUpdate();
-        return;
-      }
-      const old = terminalName;
-      terminalName = desiredName;
-      const list = terminalList();
-      connectedTerminals = list;
-      updateStatus();
-      // Notify clients only — hub already updated local state
-      hubBroadcast(
-        { type: "terminal_left", name: old, terminals: list },
-        terminalName,
-      );
-      hubBroadcast(
-        {
-          type: "terminal_joined",
-          name: desiredName,
-          terminals: list,
-          cwd: currentCwd,
-        },
-        terminalName,
-      );
-      pushStatus(true);
-    } else if (role === "client") {
-      // Client — disconnect and reconnect with new name (register includes cwd)
-      terminalName = desiredName;
-      disconnect();
-      manuallyDisconnected = false;
-      await initialize();
-    } else {
-      // Disconnected — just update local name
-      terminalName = desiredName;
-    }
   });
 
   pi.on("agent_start", async () => {
@@ -1384,18 +1283,23 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("link-disconnect", {
     description: "Disconnect from the link",
     handler: async (_args, _ctx) => {
+      pi.appendEntry("link-active", { active: false });
+      manuallyDisconnected = true;
       if (role === "disconnected") {
-        _ctx.ui.notify("Already disconnected", "info");
+        if (reconnectTimer) {
+          clearTimeout(reconnectTimer);
+          reconnectTimer = null;
+        }
+        _ctx.ui.notify("Link disconnected", "info");
         return;
       }
-      manuallyDisconnected = true;
       disconnect();
       _ctx.ui.notify("Disconnected from link", "info");
     },
   });
 
   pi.registerCommand("link-connect", {
-    description: "Connect to the link (after manual disconnect)",
+    description: "Connect to the link",
     handler: async (_args, _ctx) => {
       if (role !== "disconnected") {
         _ctx.ui.notify(
@@ -1404,6 +1308,7 @@ export default function (pi: ExtensionAPI) {
         );
         return;
       }
+      pi.appendEntry("link-active", { active: true });
       manuallyDisconnected = false;
       await initialize();
     },
