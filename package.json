@@ -1,6 +1,6 @@
 {
   "name": "pi-link",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "WebSocket-based inter-terminal communication for Pi. Connect multiple Pi terminals over a local link network.",
   "author": "alvivar",
   "license": "MIT",
@@ -25,6 +25,9 @@
   "pi": {
     "extensions": [
       "./index.ts"
+    ],
+    "skills": [
+      "./skills"
     ]
   }
 }
