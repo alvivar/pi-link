@@ -6,7 +6,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/alvivar/pi-link"
+    "url": "git+https://github.com/alvivar/pi-link.git"
   },
   "keywords": [
     "pi-package",
