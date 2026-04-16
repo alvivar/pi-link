@@ -28,6 +28,10 @@ const PROMPT_INACTIVITY_MS = 90_000;
 const PROMPT_HARD_CEILING_MS = 1_800_000;
 const RECONNECT_DELAY_MS = 2000;
 const KEEPALIVE_INTERVAL_MS = 30_000;
+const FLUSH_DELAY_MS = 200;
+const IDLE_RETRY_MS = 500;
+const BATCH_MAX_ITEMS = 20;
+const BATCH_MAX_CHARS = 16_000;
 
 // ─── Protocol ────────────────────────────────────────────────────────────────
 
@@ -159,6 +163,10 @@ export default function (pi: ExtensionAPI) {
   let pendingRemotePrompt: { id: string; from: string } | null = null;
   let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
 
+  // Inbox: idle-gated batched delivery for triggerTurn:true messages
+  const inbox: { from: string; content: string }[] = [];
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
   // ── Helpers ──────────────────────────────────────────────────────────────
 
   function updateStatus() {
@@ -232,6 +240,54 @@ export default function (pi: ExtensionAPI) {
     if (normalized.startsWith(home + "/"))
       return "~" + normalized.slice(home.length);
     return normalized;
+  }
+
+  // ── Inbox: idle-gated batched delivery ───────────────────────────────────
+
+  function scheduleFlush(delay: number) {
+    if (flushTimer) clearTimeout(flushTimer);
+    flushTimer = setTimeout(flushInbox, delay);
+  }
+
+  function flushInbox() {
+    flushTimer = null;
+    if (inbox.length === 0) return;
+    if (!ctx) return;
+
+    // Only deliver when idle so triggerTurn takes the prompt-start path
+    // instead of mid-run steering, avoiding async delivery loss.
+    if (!ctx.isIdle()) {
+      scheduleFlush(IDLE_RETRY_MS);
+      return;
+    }
+
+    // Select batch: up to BATCH_MAX_ITEMS, ~BATCH_MAX_CHARS total (soft cap —
+    // first item always included even if oversized, others deferred to next flush)
+    const batch: string[] = [];
+    let totalChars = 0;
+    for (let i = 0; i < inbox.length && batch.length < BATCH_MAX_ITEMS; i++) {
+      const item = inbox[i];
+      const text = `From "${item.from}":\n${item.content}`;
+      if (batch.length > 0 && totalChars + text.length > BATCH_MAX_CHARS) break;
+      batch.push(text);
+      totalChars += text.length;
+    }
+
+    pi.sendMessage(
+      {
+        customType: "link",
+        content: `[Link: ${batch.length} message(s) received]\n\n${batch.join("\n\n")}`,
+        display: true,
+        details: { batched: true, count: batch.length },
+      },
+      { triggerTurn: true },
+    );
+    inbox.splice(0, batch.length);
+
+    // Reschedule if inbox still has items; agent_end wakeup will usually beat this
+    if (inbox.length > 0) {
+      scheduleFlush(IDLE_RETRY_MS);
+    }
   }
 
   // ── Connection intent ──────────────────────────────────────────────────
@@ -449,15 +505,20 @@ export default function (pi: ExtensionAPI) {
 
       // ── Chat message ──
       case "chat":
-        pi.sendMessage(
-          {
-            customType: "link",
-            content: msg.content,
-            display: true,
-            details: { from: msg.from },
-          },
-          { triggerTurn: msg.triggerTurn, deliverAs: "steer" },
-        );
+        if (msg.triggerTurn) {
+          inbox.push({ from: msg.from, content: msg.content });
+          scheduleFlush(FLUSH_DELAY_MS);
+        } else {
+          pi.sendMessage(
+            {
+              customType: "link",
+              content: msg.content,
+              display: true,
+              details: { from: msg.from },
+            },
+            { triggerTurn: false, deliverAs: "steer" },
+          );
+        }
         break;
 
       // ── Another terminal asks us to run a prompt ──
@@ -767,11 +828,23 @@ export default function (pi: ExtensionAPI) {
     lastPushedKind = null;
     lastPushedTool = null;
     updateStatus();
+
+    // Inbox survives disconnect — messages are local state waiting for local delivery.
+    // Ensure pending flush still fires.
+    if (inbox.length > 0 && !flushTimer) {
+      scheduleFlush(FLUSH_DELAY_MS);
+    }
   }
 
   function cleanup() {
     disposed = true;
     disconnect();
+    // Full teardown: clear inbox and flush timer
+    inbox.length = 0;
+    if (flushTimer) {
+      clearTimeout(flushTimer);
+      flushTimer = null;
+    }
   }
 
   // ── Lifecycle events ─────────────────────────────────────────────────────
@@ -791,6 +864,11 @@ export default function (pi: ExtensionAPI) {
     if (saved?.data?.name) {
       preferredName = saved.data.name;
       terminalName = preferredName;
+    } else {
+      // No explicit link-name: fall back to session name as a better default than t-xxxx
+      const sessionName = pi.getSessionName()?.trim().replace(/\s+/g, " ");
+      if (sessionName) terminalName = sessionName;
+      // NOT saved as preferredName — only /link-name persists
     }
 
     if (shouldConnect(_ctx)) await initialize();
@@ -824,6 +902,10 @@ export default function (pi: ExtensionAPI) {
     activeToolName = null;
     stateSince = Date.now();
     pushStatus();
+
+    // Wake up inbox flush — agent_end fires before finishRun(), so ctx.isIdle()
+    // is still false here. scheduleFlush(0) defers to next macrotask when idle.
+    if (inbox.length > 0) scheduleFlush(0);
 
     // If we were running a remote prompt, send the response back
     if (pendingRemotePrompt) {
