@@ -36,7 +36,7 @@ A single Pi terminal is powerful. Multiple terminals working together unlock new
 
 ## Prerequisites
 
-- [Pi coding agent](https://github.com/nicholasgasior/pi-coding-agent) installed and working
+- [Pi coding agent](https://github.com/badlogic/pi-mono) installed and working
 - Node.js (LTS recommended)
 
 ---
