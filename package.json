@@ -1,9 +1,12 @@
 {
   "name": "pi-link",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "WebSocket-based inter-terminal communication for Pi. Connect multiple Pi terminals over a local link network.",
   "author": "alvivar",
   "license": "MIT",
+  "bin": {
+    "pi-link": "./bin/pi-link.mjs"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/alvivar/pi-link.git"

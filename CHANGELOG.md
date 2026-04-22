@@ -6,6 +6,16 @@ This changelog is based on the git history from `2026-03-21` (initial commit) th
 
 ---
 
+## 0.1.9 — 2026-04-22
+
+### Added
+
+- **`--link-name <name>` flag.** Connect to link with a chosen terminal name on startup. Implies `--link` (no need for both). Persists the name and sets the Pi session name if currently unnamed. Name precedence: `--link-name` > saved `/link-name` > session name > random `t-xxxx`.
+
+- **`pi-link start` CLI.** New bin script (`bin/pi-link.mjs`) for session-by-name resume. `pi-link start worker-1` scans `~/.pi/agent/sessions/` for a matching session name — one match resumes it, no match creates a new session, multiple matches prints candidates and exits. Extra Pi flags pass through: `pi-link start worker-1 --model sonnet --thinking high`. Local-cwd sessions prioritized.
+
+---
+
 ## 0.1.8 — 2026-04-16
 
 ### Added

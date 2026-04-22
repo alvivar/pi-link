@@ -2,7 +2,7 @@
  * Pi Link — WebSocket-based inter-terminal communication
  *
  * Connects multiple Pi terminals over a local WebSocket link.
- * Opt-in via --link flag or /link-connect command.
+ * Opt-in via --link / --link-name flag or /link-connect command.
  * First terminal to connect becomes the hub; others join as clients.
  * Hub loss triggers automatic promotion of a surviving client.
  *
@@ -113,6 +113,11 @@ export default function (pi: ExtensionAPI) {
     description: "Connect to link on startup",
     type: "boolean",
     default: false,
+  });
+
+  pi.registerFlag("link-name", {
+    description: "Connect to link with this terminal name",
+    type: "string",
   });
 
   // ── State ────────────────────────────────────────────────────────────────
@@ -853,25 +858,35 @@ export default function (pi: ExtensionAPI) {
     ctx = _ctx;
     currentCwd = _ctx.cwd;
 
-    // Restore preferred link name from session
-    const saved = _ctx.sessionManager
-      .getEntries()
-      .filter(
-        (e: { type: string; customType?: string }) =>
-          e.type === "custom" && e.customType === "link-name",
-      )
-      .pop() as { data?: { name?: string } } | undefined;
-    if (saved?.data?.name) {
-      preferredName = saved.data.name;
-      terminalName = preferredName;
+    // Resolve terminal name: --link-name flag > saved link-name > session name > random
+    const rawLinkName = pi.getFlag("link-name");
+    const flagName =
+      typeof rawLinkName === "string"
+        ? rawLinkName.trim().replace(/\s+/g, " ") || undefined
+        : undefined;
+    if (flagName) {
+      preferredName = flagName;
+      terminalName = flagName;
+      pi.appendEntry("link-name", { name: flagName });
+      if (!pi.getSessionName()) pi.setSessionName(flagName);
     } else {
-      // No explicit link-name: fall back to session name as a better default than t-xxxx
-      const sessionName = pi.getSessionName()?.trim().replace(/\s+/g, " ");
-      if (sessionName) terminalName = sessionName;
-      // NOT saved as preferredName — only /link-name persists
+      const saved = _ctx.sessionManager
+        .getEntries()
+        .filter(
+          (e: { type: string; customType?: string }) =>
+            e.type === "custom" && e.customType === "link-name",
+        )
+        .pop() as { data?: { name?: string } } | undefined;
+      if (saved?.data?.name) {
+        preferredName = saved.data.name;
+        terminalName = preferredName;
+      } else {
+        const sessionName = pi.getSessionName()?.trim().replace(/\s+/g, " ");
+        if (sessionName) terminalName = sessionName;
+      }
     }
 
-    if (shouldConnect(_ctx)) await initialize();
+    if (flagName || shouldConnect(_ctx)) await initialize();
   });
 
   pi.on("session_shutdown", async () => {

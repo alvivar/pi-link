@@ -2,7 +2,7 @@
 
 A WebSocket-based inter-terminal communication system that creates a local network between multiple Pi coding agent terminals. Enables terminals to discover each other, exchange messages, and orchestrate work across agents - all automatically on `localhost`.
 
-> Self-contained TypeScript in a single `index.ts` file. Start Pi with `--link` to enable.
+> Self-contained TypeScript in a single `index.ts` file. Start Pi with `--link` or `--link-name <name>` to enable.
 
 ---
 
@@ -57,16 +57,23 @@ pi uninstall npm:pi-link
 
 ### Usage
 
-Link is **off by default**. Start Pi with the `--link` flag to auto-connect on startup:
+Link is **off by default**. Start Pi with `--link-name` to connect with a meaningful name:
 
 ```
 Terminal 1                            Terminal 2
 ----------                            ----------
-$ pi --link                           $ pi --link
-✓ Link hub started on :9900 as "t-a1b2"  ✓ Joined link as "t-c3d4" (2 online)
+$ pi --link-name builder              $ pi --link-name reviewer
+✓ Link hub started on :9900 as "builder"  ✓ Joined link as "reviewer" (2 online)
 ```
 
-Already in a session without `--link`? You can connect mid-session with `/link-connect`.
+Or use `pi-link start` to resume an existing session by name (or create one):
+
+```bash
+pi-link start worker-1                # resume or create session "worker-1"
+pi-link start worker-1 --model sonnet # with extra Pi flags
+```
+
+`pi --link` also works (connects with an auto-generated name). Already in a session without either flag? Connect mid-session with `/link-connect`.
 
 Use `/link` in any terminal to check status, or let the LLM tools handle cross-terminal coordination.
 
@@ -124,17 +131,40 @@ Every other terminal sees:
 
 ## Configuration
 
-Link is **off by default**. Without `--link`, the extension is completely silent - no status bar, no connections, no warnings.
+Link is **off by default**. Without `--link` or `--link-name`, the extension is completely silent — no status bar, no connections, no warnings.
 
-| Method             | When                                | Auto-reconnect?                  |
-| ------------------ | ----------------------------------- | -------------------------------- |
-| `pi --link`        | Auto-connect on startup             | Yes                              |
-| `/link-connect`    | Opt-in mid-session (no flag needed) | Yes                              |
-| `/link-disconnect` | Opt-out mid-session                 | Suppressed until `/link-connect` |
+| Method                  | When                                | Auto-reconnect?                  |
+| ----------------------- | ----------------------------------- | -------------------------------- |
+| `pi --link-name <name>` | Connect on startup with a name      | Yes                              |
+| `pi --link`             | Connect on startup (random name)    | Yes                              |
+| `pi-link start <name>`  | Resume/create session, connect      | Yes                              |
+| `/link-connect`         | Opt-in mid-session (no flag needed) | Yes                              |
+| `/link-disconnect`      | Opt-out mid-session                 | Suppressed until `/link-connect` |
 
-`/link-connect` enables full participation in Pi Link regardless of whether `--link` was passed. Both `/link-connect` and `/link-disconnect` save their intent to the session - resume that session later and the connection state is restored without needing the flag. Explicit user intent takes precedence over `--link`.
+`--link-name` implies `--link` — no need for both. It also persists the name and sets the Pi session name if the session is currently unnamed.
+
+**Name precedence:** `--link-name` flag > saved `/link-name` > Pi session name > random `t-xxxx`.
+
+`/link-connect` and `/link-disconnect` save their intent to the session — resume later and the connection state is restored without needing the flag. Explicit user intent takes precedence over `--link`.
 
 Once connected, terminals discover each other on `127.0.0.1:9900`. See [Limitations](#limitations--design-decisions) for the hardcoded port.
+
+### `pi-link start`
+
+The `pi-link` CLI resolves sessions by display name:
+
+```bash
+pi-link start <name> [pi-flags...]
+```
+
+- Scans `~/.pi/agent/sessions/` for sessions with a matching name
+- **One match** → resumes that session with `--link-name <name>`
+- **No match** → starts a new session with `--link-name <name>`
+- **Multiple matches** → prints candidates (cwd, modified date, path) and exits
+- Extra Pi flags pass through: `pi-link start worker-1 --model sonnet --thinking high`
+- `--session` and `--link-name` cannot be passed as extra flags (managed by `pi-link start`)
+
+Sessions in the current working directory are prioritized when sorting candidates.
 
 ---
 
@@ -293,7 +323,7 @@ The network topology is **hub-spoke (star)**:
 
 ### Auto-Discovery Protocol
 
-The discovery sequence runs on startup (with `--link`) or when `/link-connect` is used. See [Configuration](#configuration) for details.
+The discovery sequence runs on startup (with `--link` or `--link-name`) or when `/link-connect` is used. See [Configuration](#configuration) for details.
 
 The sequence is a simple fallback:
 
@@ -377,6 +407,9 @@ When the hub goes down and a client promotes itself, terminal names and in-fligh
 ```json
 {
   "name": "pi-link",
+  "bin": {
+    "pi-link": "./bin/pi-link.mjs"
+  },
   "dependencies": {
     "ws": "^8.20.0"
   },
@@ -390,7 +423,7 @@ When the hub goes down and a client promotes itself, terminal names and in-fligh
 }
 ```
 
-The `pi.extensions` field tells Pi which files to load as extensions. `pi.skills` registers bundled skill directories - the `pi-link-coordination` skill is loaded automatically on install.
+`pi.extensions` tells Pi which files to load as extensions. `pi.skills` registers bundled skill directories. `bin` exposes the `pi-link` CLI (see [Configuration](#configuration)).
 
 ---
 
@@ -529,11 +562,11 @@ The flush pipeline:
 
 1. **Debounce** - `scheduleFlush(FLUSH_DELAY_MS)` coalesces burst arrivals (200ms window).
 2. **Idle gate** - `flushInbox()` checks `ctx.isIdle()`. If busy, retries every 500ms.
-3. **Batch** — up to 20 messages or ~16 000 chars per delivery (soft cap — the first item is always included even if oversized).
-4. **Deliver** — one `pi.sendMessage({ triggerTurn: true })` call with a `[Link: N message(s) received]` block.
-5. **Drain** — if the inbox still has items, reschedule.
+3. **Batch** - up to 20 messages or ~16 000 chars per delivery (soft cap - the first item is always included even if oversized).
+4. **Deliver** - one `pi.sendMessage({ triggerTurn: true })` call with a `[Link: N message(s) received]` block.
+5. **Drain** - if the inbox still has items, reschedule.
 
-On `agent_end`, the inbox flush is kicked via `scheduleFlush(0)` — deferred to the next macrotask, by which time `ctx.isIdle()` returns `true`.
+On `agent_end`, the inbox flush is kicked via `scheduleFlush(0)` - deferred to the next macrotask, by which time `ctx.isIdle()` returns `true`.
 
 | Constant          | Value  | Purpose                                  |
 | ----------------- | ------ | ---------------------------------------- |
