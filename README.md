@@ -2,7 +2,7 @@
 
 A WebSocket-based inter-terminal communication system that creates a local network between multiple Pi coding agent terminals. Enables terminals to discover each other, exchange messages, and orchestrate work across agents - all automatically on `localhost`.
 
-> Self-contained TypeScript in a single `index.ts` file. Start Pi with `--link` or `--link-name <name>` to enable.
+> Self-contained TypeScript in a single `index.ts` file. Start Pi with `--link` or `--link-name <name>` to enable
 
 ---
 
@@ -57,23 +57,23 @@ pi uninstall npm:pi-link
 
 ### Usage
 
-Link is **off by default**. Start Pi with `--link-name` to connect with a meaningful name:
+Link is **off by default**. Start Pi with `--link` to auto-connect on startup:
 
 ```
 Terminal 1                            Terminal 2
 ----------                            ----------
+$ pi --link                           $ pi --link
+✓ Link hub started on :9900 as "t-a1b2"  ✓ Joined link as "t-c3d4" (2 online)
+```
+
+Use `--link-name` to connect with a meaningful name instead. The name is remembered — next time, it resumes the same session:
+
+```
 $ pi --link-name builder              $ pi --link-name reviewer
 ✓ Link hub started on :9900 as "builder"  ✓ Joined link as "reviewer" (2 online)
 ```
 
-Or use `pi-link start` to resume an existing session by name (or create one):
-
-```bash
-pi-link start worker-1                # resume or create session "worker-1"
-pi-link start worker-1 --model sonnet # with extra Pi flags
-```
-
-`pi --link` also works (connects with an auto-generated name). Already in a session without either flag? Connect mid-session with `/link-connect`.
+Already in a session? Connect mid-session with `/link-connect`.
 
 Use `/link` in any terminal to check status, or let the LLM tools handle cross-terminal coordination.
 
@@ -135,36 +135,18 @@ Link is **off by default**. Without `--link` or `--link-name`, the extension is 
 
 | Method                  | When                                | Auto-reconnect?                  |
 | ----------------------- | ----------------------------------- | -------------------------------- |
-| `pi --link-name <name>` | Connect on startup with a name      | Yes                              |
 | `pi --link`             | Connect on startup (random name)    | Yes                              |
-| `pi-link start <name>`  | Resume/create session, connect      | Yes                              |
+| `pi --link-name <name>` | Connect on startup with a name      | Yes                              |
 | `/link-connect`         | Opt-in mid-session (no flag needed) | Yes                              |
 | `/link-disconnect`      | Opt-out mid-session                 | Suppressed until `/link-connect` |
 
-`--link-name` implies `--link` — no need for both. It also persists the name and sets the Pi session name if the session is currently unnamed.
+`--link-name` implies `--link` — no need for both. It persists the link name, sets the Pi session name if currently unnamed, and resumes an existing session with that name if one exists. The bundled `pi-link start` helper handles session lookup under the hood (since Pi's `--session` flag requires a path, not a name).
 
 **Name precedence:** `--link-name` flag > saved `/link-name` > Pi session name > random `t-xxxx`.
 
 `/link-connect` and `/link-disconnect` save their intent to the session — resume later and the connection state is restored without needing the flag. Explicit user intent takes precedence over `--link`.
 
 Once connected, terminals discover each other on `127.0.0.1:9900`. See [Limitations](#limitations--design-decisions) for the hardcoded port.
-
-### `pi-link start`
-
-The `pi-link` CLI resolves sessions by display name:
-
-```bash
-pi-link start <name> [pi-flags...]
-```
-
-- Scans `~/.pi/agent/sessions/` for sessions with a matching name
-- **One match** → resumes that session with `--link-name <name>`
-- **No match** → starts a new session with `--link-name <name>`
-- **Multiple matches** → prints candidates (cwd, modified date, path) and exits
-- Extra Pi flags pass through: `pi-link start worker-1 --model sonnet --thinking high`
-- `--session` and `--link-name` cannot be passed as extra flags (managed by `pi-link start`)
-
-Sessions in the current working directory are prioritized when sorting candidates.
 
 ---
 
