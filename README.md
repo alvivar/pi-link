@@ -137,6 +137,7 @@ Link is **off by default**. Without `--link` or `--link-name`, the extension is 
 | ----------------------- | ----------------------------------- | -------------------------------- |
 | `pi --link`             | Connect on startup (random name)    | Yes                              |
 | `pi --link-name <name>` | Connect on startup with a name      | Yes                              |
+| `pi --link-observe`     | Connect as passive observer (implies `--link`) | Yes                   |
 | `/link-connect`         | Opt-in mid-session (no flag needed) | Yes                              |
 | `/link-disconnect`      | Opt-out mid-session                 | Suppressed until `/link-connect` |
 
@@ -147,6 +148,25 @@ Link is **off by default**. Without `--link` or `--link-name`, the extension is 
 `/link-connect` and `/link-disconnect` save their intent to the session — resume later and the connection state is restored without needing the flag. Explicit user intent takes precedence over `--link`.
 
 Once connected, terminals discover each other on `127.0.0.1:9900`. See [Limitations](#limitations--design-decisions) for the hardcoded port.
+
+---
+
+## Observer mode
+
+Pass `--link-observe` to connect as a passive observer. The hub fans out copies of every routed `chat`, `prompt_request`, and `prompt_response` — including messages between other peers — to observer clients. Useful for supervisor / watcher / audit agents that want a full view of hub traffic.
+
+```
+$ pi --link-observe --link-name watcher
+✓ Joined link as "watcher" (3 online)
+```
+
+Observers see observed traffic as `ctx.ui.notify` banners and as `pi.sendMessage` with `customType: "link-observed"` injected into their agent context (no turn triggered). They do not receive their own outgoing messages echoed back, and the client-side filter prevents them from executing `prompt_request`s addressed to other terminals. They still have full access to `link_send` / `link_prompt` / `link_list`.
+
+`link_list` and `/link` tag observers with `[observing]` so peers can see who's watching.
+
+**Compatibility.** Opt-in and additive: old clients don't send the `observer` field, old hubs ignore it. A client running `--link-observe` against a pre-patch hub connects normally; observer-mode fanout is silently inactive.
+
+**Caveats.** Best-effort delivery; no filtering; no auth (localhost-only trust model unchanged); observer state is per-hub and is reset on hub promotion. Do not run observer mode on shared machines where inter-agent traffic is sensitive.
 
 ---
 

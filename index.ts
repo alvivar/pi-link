@@ -39,6 +39,7 @@ interface RegisterMsg {
   type: "register";
   name: string;
   cwd?: string;
+  observer?: boolean;
 }
 interface WelcomeMsg {
   type: "welcome";
@@ -46,12 +47,14 @@ interface WelcomeMsg {
   terminals: string[];
   statuses?: Record<string, LinkStatus>;
   cwds?: Record<string, string>;
+  observers?: string[];
 }
 interface TerminalJoinedMsg {
   type: "terminal_joined";
   name: string;
   terminals: string[];
   cwd?: string;
+  observer?: boolean;
 }
 interface TerminalLeftMsg {
   type: "terminal_left";
@@ -120,6 +123,13 @@ export default function (pi: ExtensionAPI) {
     type: "string",
   });
 
+  pi.registerFlag("link-observe", {
+    description:
+      "Connect as observer; receive copies of all routed hub traffic. Implies --link.",
+    type: "boolean",
+    default: false,
+  });
+
   // ── State ────────────────────────────────────────────────────────────────
 
   let role: "hub" | "client" | "disconnected" = "disconnected";
@@ -146,9 +156,11 @@ export default function (pi: ExtensionAPI) {
   const hubClients = new Map<WebSocket, string>(); // ws → terminal name
   const hubTerminalStatuses = new Map<string, LinkStatus>(); // hub-authoritative
   const hubTerminalCwds = new Map<string, string>(); // hub-authoritative (excludes self)
+  const observerClients = new Set<WebSocket>(); // subscribers that see all routed traffic
 
   // Client state
   let ws: WebSocket | null = null;
+  const observerNames = new Set<string>(); // for link_list [observing] rendering
 
   // Pending prompt responses (sender waiting for remote answer)
   const pendingPromptResponses = new Map<
@@ -175,7 +187,8 @@ export default function (pi: ExtensionAPI) {
   // ── Helpers ──────────────────────────────────────────────────────────────
 
   function updateStatus() {
-    if (!ctx) return;
+    // ctx is marked stale during session_shutdown; socket-close cascade calls this
+    if (!ctx || disposed) return;
     const theme = ctx.ui.theme;
     const count = connectedTerminals.length;
     const info =
@@ -306,7 +319,8 @@ export default function (pi: ExtensionAPI) {
       )
       .pop() as { data?: { active?: boolean } } | undefined;
     if (saved?.data?.active !== undefined) return saved.data.active;
-    return pi.getFlag("link") === true;
+    // --link-observe implies --link
+    return pi.getFlag("link") === true || pi.getFlag("link-observe") === true;
   }
 
   // ── Pending prompt helpers ───────────────────────────────────────────────
@@ -373,6 +387,16 @@ export default function (pi: ExtensionAPI) {
   // ── Routing ──────────────────────────────────────────────────────────────
 
   /** Hub: broadcast a message to every terminal except `excludeName`. */
+  function observerFanout(msg: LinkMessage) {
+    if (observerClients.size === 0) return;
+    const json = JSON.stringify(msg);
+    const senderWs = hubClientByName("from" in msg ? msg.from : "");
+    for (const obs of observerClients) {
+      if (obs === senderWs) continue;
+      try { obs.send(json); } catch {}
+    }
+  }
+
   function hubBroadcast(msg: LinkMessage, excludeName?: string) {
     const json = JSON.stringify(msg);
     for (const [clientWs, name] of hubClients) {
@@ -401,16 +425,19 @@ export default function (pi: ExtensionAPI) {
   ): boolean {
     if (role === "hub") {
       if (msg.to === "*") {
+        // Broadcasts reach observers via hubBroadcast; no extra fanout needed.
         hubBroadcast(msg, msg.from);
         return true;
       }
       if (msg.to === terminalName) {
         handleIncoming(msg);
+        observerFanout(msg);
         return true;
       }
       const targetWs = hubClientByName(msg.to);
       if (targetWs) {
         targetWs.send(JSON.stringify(msg));
+        observerFanout(msg);
         return true;
       }
       // Target not found — send error back to sender
@@ -454,6 +481,7 @@ export default function (pi: ExtensionAPI) {
         connectedTerminals = msg.terminals;
         terminalStatuses.clear();
         terminalCwds.clear();
+        observerNames.clear();
         if (msg.statuses) {
           for (const [name, status] of Object.entries(msg.statuses)) {
             terminalStatuses.set(name, status);
@@ -463,6 +491,9 @@ export default function (pi: ExtensionAPI) {
           for (const [name, cwd] of Object.entries(msg.cwds)) {
             terminalCwds.set(name, cwd);
           }
+        }
+        if (msg.observers) {
+          for (const name of msg.observers) observerNames.add(name);
         }
         updateStatus();
         ctx?.ui.notify(
@@ -476,6 +507,7 @@ export default function (pi: ExtensionAPI) {
       case "terminal_joined":
         connectedTerminals = msg.terminals;
         if (role !== "hub" && msg.cwd) terminalCwds.set(msg.name, msg.cwd);
+        if (msg.observer === true) observerNames.add(msg.name);
         updateStatus();
         ctx?.ui.notify(`"${msg.name}" joined the link`, "info");
         break;
@@ -483,6 +515,7 @@ export default function (pi: ExtensionAPI) {
       case "terminal_left":
         connectedTerminals = msg.terminals;
         terminalStatuses.delete(msg.name);
+        observerNames.delete(msg.name);
         if (role !== "hub") terminalCwds.delete(msg.name);
         // Fail any pending prompts to the departed terminal immediately
         for (const [id, pending] of pendingPromptResponses) {
@@ -510,6 +543,29 @@ export default function (pi: ExtensionAPI) {
 
       // ── Chat message ──
       case "chat":
+        // Observer: copy of a message not addressed to us. Surface in UI +
+        // agent context without triggering a turn or acting on it.
+        if (msg.to !== terminalName && msg.to !== "*") {
+          ctx?.ui.notify(
+            `[observe] chat ${msg.from} → ${msg.to}: ${msg.content.slice(0, 80)}`,
+            "info",
+          );
+          pi.sendMessage(
+            {
+              customType: "link-observed",
+              content: `[observed] chat ${msg.from} → ${msg.to}\n${msg.content}`,
+              display: true,
+              details: {
+                kind: "chat",
+                from: msg.from,
+                to: msg.to,
+                triggerTurn: msg.triggerTurn,
+              },
+            },
+            { triggerTurn: false, deliverAs: "steer" },
+          );
+          break;
+        }
         if (msg.triggerTurn) {
           inbox.push({ from: msg.from, content: msg.content });
           scheduleFlush(FLUSH_DELAY_MS);
@@ -528,6 +584,28 @@ export default function (pi: ExtensionAPI) {
 
       // ── Another terminal asks us to run a prompt ──
       case "prompt_request":
+        // Observer: never execute a prompt addressed to someone else.
+        if (msg.to !== terminalName) {
+          ctx?.ui.notify(
+            `[observe] prompt ${msg.from} → ${msg.to}`,
+            "info",
+          );
+          pi.sendMessage(
+            {
+              customType: "link-observed",
+              content: `[observed] prompt_request ${msg.from} → ${msg.to}\n${msg.prompt}`,
+              display: true,
+              details: {
+                kind: "prompt_request",
+                id: msg.id,
+                from: msg.from,
+                to: msg.to,
+              },
+            },
+            { triggerTurn: false, deliverAs: "steer" },
+          );
+          break;
+        }
         if (agentRunning || pendingRemotePrompt) {
           routeMessage({
             type: "prompt_response",
@@ -554,6 +632,31 @@ export default function (pi: ExtensionAPI) {
 
       // ── Response to a prompt we sent ──
       case "prompt_response": {
+        // Observer: copy addressed to someone else. Don't touch pending map.
+        if (msg.to !== terminalName) {
+          ctx?.ui.notify(
+            `[observe] prompt_response ${msg.from} → ${msg.to}`,
+            "info",
+          );
+          pi.sendMessage(
+            {
+              customType: "link-observed",
+              content: `[observed] prompt_response ${msg.from} → ${msg.to}${
+                msg.error ? `\nerror: ${msg.error}` : `\n${msg.response}`
+              }`,
+              display: true,
+              details: {
+                kind: "prompt_response",
+                id: msg.id,
+                from: msg.from,
+                to: msg.to,
+                error: msg.error,
+              },
+            },
+            { triggerTurn: false, deliverAs: "steer" },
+          );
+          break;
+        }
         const pending = cleanupPending(msg.id);
         if (pending) {
           if (msg.error) {
@@ -590,11 +693,12 @@ export default function (pi: ExtensionAPI) {
         clientName = uniqueName(msg.name);
         hubClients.set(clientWs, clientName);
         if (msg.cwd) hubTerminalCwds.set(clientName, msg.cwd);
+        if (msg.observer === true) observerClients.add(clientWs);
         const list = terminalList();
         connectedTerminals = list;
         updateStatus();
 
-        // Confirm to the new client (include status + cwd snapshots)
+        // Confirm to the new client (include status + cwd + observer snapshots)
         const statuses: Record<string, LinkStatus> = {};
         statuses[terminalName] = deriveStatus(); // hub's own status
         for (const [name, status] of hubTerminalStatuses) {
@@ -605,6 +709,11 @@ export default function (pi: ExtensionAPI) {
         for (const [name, cwd] of hubTerminalCwds) {
           if (name !== clientName) cwds[name] = cwd;
         }
+        const obsNames: string[] = [];
+        for (const ws of observerClients) {
+          const n = hubClients.get(ws);
+          if (n) obsNames.push(n);
+        }
         clientWs.send(
           JSON.stringify({
             type: "welcome",
@@ -612,15 +721,17 @@ export default function (pi: ExtensionAPI) {
             terminals: list,
             statuses,
             cwds,
+            observers: obsNames,
           } satisfies WelcomeMsg),
         );
 
-        // Notify everyone else (include joiner's cwd)
+        // Notify everyone else (include joiner's cwd + observer flag)
         const joined: TerminalJoinedMsg = {
           type: "terminal_joined",
           name: clientName,
           terminals: list,
           cwd: msg.cwd,
+          observer: msg.observer === true,
         };
         hubBroadcast(joined, clientName);
         return;
@@ -660,6 +771,7 @@ export default function (pi: ExtensionAPI) {
         hubClients.delete(clientWs);
         hubTerminalStatuses.delete(clientName);
         hubTerminalCwds.delete(clientName);
+        observerClients.delete(clientWs);
         const list = terminalList();
         connectedTerminals = list;
         updateStatus();
@@ -720,11 +832,13 @@ export default function (pi: ExtensionAPI) {
         role = "client";
         resolved = true;
         // Register with preferred name if available, otherwise current name
+        const observer = pi.getFlag("link-observe") === true;
         socket.send(
           JSON.stringify({
             type: "register",
             name: preferredName ?? terminalName,
             cwd: currentCwd || undefined,
+            observer: observer || undefined,
           } satisfies RegisterMsg),
         );
         resolve(true);
@@ -820,6 +934,7 @@ export default function (pi: ExtensionAPI) {
     if (wss) {
       for (const clientWs of hubClients.keys()) clientWs.close();
       hubClients.clear();
+      observerClients.clear();
       wss.close();
       wss = null;
     }
@@ -830,6 +945,7 @@ export default function (pi: ExtensionAPI) {
     hubTerminalStatuses.clear();
     terminalCwds.clear();
     hubTerminalCwds.clear();
+    observerNames.clear();
     lastPushedKind = null;
     lastPushedTool = null;
     updateStatus();
@@ -1186,6 +1302,15 @@ export default function (pi: ExtensionAPI) {
     async execute() {
       if (role === "disconnected") return notConnectedResult();
 
+      // Hub knows observers authoritatively; clients learn from welcome / terminal_joined.
+      const observersView = new Set<string>(observerNames);
+      if (role === "hub") {
+        for (const wsOther of observerClients) {
+          const name = hubClients.get(wsOther);
+          if (name) observersView.add(name);
+        }
+      }
+
       const statuses: Record<string, string> = {};
       const cwds: Record<string, string> = {};
       const list = connectedTerminals
@@ -1196,7 +1321,8 @@ export default function (pi: ExtensionAPI) {
           const cwd = getCwdFor(name);
           if (cwd) cwds[name] = cwd;
           const marker = name === terminalName ? " (you)" : "";
-          let line = `  \u2022 ${name}${marker}${statusStr ? "  " + statusStr : ""}`;
+          const observerTag = observersView.has(name) ? "  [observing]" : "";
+          let line = `  \u2022 ${name}${marker}${statusStr ? "  " + statusStr : ""}${observerTag}`;
           if (cwd) line += `\n    cwd: ${cwd}`;
           return line;
         })
@@ -1206,6 +1332,7 @@ export default function (pi: ExtensionAPI) {
         terminals: connectedTerminals,
         statuses,
         cwds,
+        observers: Array.from(observersView),
         self: terminalName,
         role,
       });
@@ -1217,6 +1344,7 @@ export default function (pi: ExtensionAPI) {
             terminals?: string[];
             statuses?: Record<string, string>;
             cwds?: Record<string, string>;
+            observers?: string[];
             self?: string;
             role?: string;
           }
@@ -1226,6 +1354,7 @@ export default function (pi: ExtensionAPI) {
         return new Text(txt?.type === "text" ? txt.text : "", 0, 0);
       }
 
+      const observerSet = new Set(details.observers ?? []);
       let text = theme.fg("toolTitle", theme.bold("link "));
       text += theme.fg("muted", `(${details.role}) `);
       text += theme.fg("accent", `${details.terminals.length} terminal(s)`);
@@ -1234,10 +1363,14 @@ export default function (pi: ExtensionAPI) {
         const status = details.statuses?.[name] ?? "";
         const cwd = details.cwds?.[name];
         const nameStr = isSelf ? `\u2022 ${name} (you)` : `\u2022 ${name}`;
+        const observerTag = observerSet.has(name)
+          ? "  " + theme.fg("muted", "[observing]")
+          : "";
         text +=
           "\n  " +
           (isSelf ? theme.fg("accent", nameStr) : theme.fg("text", nameStr)) +
-          (status ? "  " + theme.fg("dim", status) : "");
+          (status ? "  " + theme.fg("dim", status) : "") +
+          observerTag;
         if (cwd) text += "\n    " + theme.fg("dim", `cwd: ${shortenPath(cwd)}`);
       }
       return new Text(text, 0, 0);
@@ -1253,12 +1386,20 @@ export default function (pi: ExtensionAPI) {
         _ctx.ui.notify("Link: not connected", "warning");
         return;
       }
+      const observersView = new Set<string>(observerNames);
+      if (role === "hub") {
+        for (const wsOther of observerClients) {
+          const name = hubClients.get(wsOther);
+          if (name) observersView.add(name);
+        }
+      }
       const lines = connectedTerminals.map((name) => {
         const status = getStatusFor(name);
         const statusStr = status ? formatStatus(status) : "";
         const cwd = getCwdFor(name);
         const marker = name === terminalName ? " (you)" : "";
-        let line = `${name}${marker}${statusStr ? ": " + statusStr : ""}`;
+        const observerTag = observersView.has(name) ? " [observing]" : "";
+        let line = `${name}${marker}${statusStr ? ": " + statusStr : ""}${observerTag}`;
         if (cwd) line += `\n  cwd: ${shortenPath(cwd)}`;
         return line;
       });
