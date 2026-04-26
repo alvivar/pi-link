@@ -29,7 +29,7 @@ Pick one mode per terminal per task. Mixing sync and async on the same terminal 
 
 ### `link_list`
 
-Returns connected terminals with names, live status (`idle`, `thinking`, `tool:<name>`), and working directory (cwd). Use before delegating when availability or path context is uncertain.
+Returns connected terminals with names, live status (`idle`, `thinking`, `tool:<name>`), and working directory (cwd). Use before delegating when availability or path context is uncertain. Your own entry is marked `(you)` — use this to discover your link name when replying to broadcast tasks.
 
 ### `link_prompt`
 
@@ -44,13 +44,17 @@ Synchronous RPC. Send a prompt, wait for the response.
 
 Fire-and-forget. Send to one terminal or `to: "*"` to broadcast (excludes sender).
 
-Set `triggerTurn: true` to activate the receiver's LLM. The sender does **not** get the response back.
+Set `triggerTurn: true` to queue async work on the receiver. Delivery happens at turn boundaries: pending messages are batched and surface together when the receiver next becomes idle. The sender does **not** get the response back.
+
+Batched callback shape: `[Link: N message(s) received]` then one or more `From "name":` / `content` blocks.
 
 **Callback contract for `triggerTurn: true`:** ask the receiver to reply via `link_send` with:
 
-- `DONE` signal
+- `DONE` / `BLOCKED`
 - Output paths / artifacts created
-- Blockers or open questions
+- Short result summary or next question
+
+Keep callbacks concise. Put long details in files and return the paths.
 
 ---
 
@@ -73,11 +77,11 @@ For answers, review, analysis you need back now. One terminal at a time. Keep sc
 
 ### Async delegate — `link_send(triggerTurn: true)`
 
-For autonomous work. Require the callback contract (DONE + paths + blockers). Do your own work in parallel. Don't `link_prompt` the target until the callback arrives.
+For autonomous work. Require the callback contract (DONE/BLOCKED + paths + short summary). Do your own work in parallel. Expect the callback at a turn boundary, possibly batched with others. Don't `link_prompt` the target until the callback arrives.
 
 ### Parallel batch — async to multiple terminals
 
-Distribute independent tasks. Use explicit paths (absolute if cwds differ). Wait for all callbacks, then synthesize. Don't prompt any dispatched terminal until its callback arrives.
+Distribute independent tasks. Worker callbacks may return together in one batched turn when you become idle. Use explicit paths (absolute if cwds differ), require short callbacks + artifact paths, wait for all callbacks, then synthesize. Don't prompt any dispatched terminal until its callback arrives.
 
 ---
 
@@ -86,20 +90,23 @@ Distribute independent tasks. Use explicit paths (absolute if cwds differ). Wait
 **❌ Mixing async and sync on the same terminal**
 Dispatched with `link_send(triggerTurn: true)` then sent a `link_prompt` → rejected as busy. See Golden Rule.
 
-**❌ Using `link_send` when you need the response**
-Result disappears. Use `link_prompt`.
+**❌ Using `link_send` when you need the response now**
+No direct response comes back to the sender. Use `link_prompt` when you need the answer in the same turn.
 
 **❌ Vague prompts**
 "Fix the bug" is useless. Include file, line, root cause, expected fix.
 
 **❌ No completion callback on async work**
-Always require DONE + artifact paths + blockers.
+Always require DONE/BLOCKED + artifact paths + short summary.
 
 **❌ Circular delegation**
 A → B → C → A = deadlock. Maintain clear hierarchy.
 
 **❌ Skipping `link_list` before retrying a busy target**
 Check status before re-sending.
+
+**❌ Long async callbacks**
+Long callbacks crowd a whole batched turn. Ask workers to write detailed output to files and return paths + short summaries.
 
 ---
 

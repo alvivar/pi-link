@@ -2,7 +2,7 @@
  * Pi Link — WebSocket-based inter-terminal communication
  *
  * Connects multiple Pi terminals over a local WebSocket link.
- * Opt-in via --link / --link-name flag or /link-connect command.
+ * Opt-in via --link flag, pi-link CLI, or /link-connect command.
  * First terminal to connect becomes the hub; others join as clients.
  * Hub loss triggers automatic promotion of a surviving client.
  *
@@ -115,11 +115,6 @@ export default function (pi: ExtensionAPI) {
     default: false,
   });
 
-  pi.registerFlag("link-name", {
-    description: "Connect to link with this terminal name",
-    type: "string",
-  });
-
   // ── State ────────────────────────────────────────────────────────────────
 
   let role: "hub" | "client" | "disconnected" = "disconnected";
@@ -130,6 +125,7 @@ export default function (pi: ExtensionAPI) {
   let disposed = false;
   let manuallyDisconnected = false;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let startupConnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Status tracking (local truth)
   let agentRunning = false;
@@ -174,15 +170,33 @@ export default function (pi: ExtensionAPI) {
 
   // ── Helpers ──────────────────────────────────────────────────────────────
 
+  function getUi() {
+    if (!ctx) return null;
+    try {
+      return ctx.ui;
+    } catch {
+      return null;
+    }
+  }
+
+  function isRuntimeLive() {
+    return !disposed && getUi() !== null;
+  }
+
+  function notify(message: string, level: "info" | "warning" | "error") {
+    getUi()?.notify(message, level);
+  }
+
   function updateStatus() {
-    if (!ctx) return;
-    const theme = ctx.ui.theme;
+    const ui = getUi();
+    if (!ui) return;
+    const theme = ui.theme;
     const count = connectedTerminals.length;
     const info =
       role === "disconnected"
         ? "link: offline"
         : `link: ${terminalName} (${role}) · ${count} terminal${count !== 1 ? "s" : ""}`;
-    ctx.ui.setStatus("link", theme.fg("dim", info));
+    ui.setStatus("link", theme.fg("dim", info));
   }
 
   function deriveStatus(): LinkStatus {
@@ -247,6 +261,16 @@ export default function (pi: ExtensionAPI) {
     return normalized;
   }
 
+  // ── Startup connect ──────────────────────────────────────────────────────
+
+  function scheduleStartupConnect() {
+    if (startupConnectTimer) clearTimeout(startupConnectTimer);
+    startupConnectTimer = setTimeout(() => {
+      startupConnectTimer = null;
+      if (!disposed && ctx) initialize();
+    }, 0);
+  }
+
   // ── Inbox: idle-gated batched delivery ───────────────────────────────────
 
   function scheduleFlush(delay: number) {
@@ -261,7 +285,13 @@ export default function (pi: ExtensionAPI) {
 
     // Only deliver when idle so triggerTurn takes the prompt-start path
     // instead of mid-run steering, avoiding async delivery loss.
-    if (!ctx.isIdle()) {
+    let idle: boolean;
+    try {
+      idle = ctx.isIdle();
+    } catch {
+      return; // stale context — bail without retry
+    }
+    if (!idle) {
       scheduleFlush(IDLE_RETRY_MS);
       return;
     }
@@ -465,7 +495,7 @@ export default function (pi: ExtensionAPI) {
           }
         }
         updateStatus();
-        ctx?.ui.notify(
+        notify(
           `Joined link as "${terminalName}" (${connectedTerminals.length} online)`,
           "info",
         );
@@ -477,7 +507,7 @@ export default function (pi: ExtensionAPI) {
         connectedTerminals = msg.terminals;
         if (role !== "hub" && msg.cwd) terminalCwds.set(msg.name, msg.cwd);
         updateStatus();
-        ctx?.ui.notify(`"${msg.name}" joined the link`, "info");
+        notify(`"${msg.name}" joined the link`, "info");
         break;
 
       case "terminal_left":
@@ -499,7 +529,7 @@ export default function (pi: ExtensionAPI) {
           }
         }
         updateStatus();
-        ctx?.ui.notify(`"${msg.name}" left the link`, "info");
+        notify(`"${msg.name}" left the link`, "info");
         break;
 
       // ── Status update from another terminal ──
@@ -545,7 +575,7 @@ export default function (pi: ExtensionAPI) {
             () => pushStatus(true),
             KEEPALIVE_INTERVAL_MS,
           );
-          ctx?.ui.notify(`Running remote prompt from "${msg.from}"`, "info");
+          notify(`Running remote prompt from "${msg.from}"`, "info");
           pi.sendUserMessage(
             `[Remote prompt from "${msg.from}"]\n\n${msg.prompt}`,
           );
@@ -571,7 +601,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       case "error":
-        ctx?.ui.notify(`Link: ${msg.message}`, "error");
+        notify(`Link: ${msg.message}`, "error");
         break;
     }
   }
@@ -582,6 +612,7 @@ export default function (pi: ExtensionAPI) {
     let clientName = "";
 
     clientWs.on("message", (raw) => {
+      if (!isRuntimeLive()) return;
       const msg = safeParse(raw.toString());
       if (!msg) return;
 
@@ -656,6 +687,7 @@ export default function (pi: ExtensionAPI) {
     });
 
     clientWs.on("close", () => {
+      if (disposed) return;
       if (clientName) {
         hubClients.delete(clientWs);
         hubTerminalStatuses.delete(clientName);
@@ -687,19 +719,29 @@ export default function (pi: ExtensionAPI) {
       });
 
       server.on("listening", () => {
+        if (disposed) {
+          server.close();
+          resolve(false);
+          return;
+        }
         wss = server;
         role = "hub";
         connectedTerminals = [terminalName];
         updateStatus();
-
-        ctx?.ui.notify(
+        notify(
           `Link hub started on :${DEFAULT_PORT} as "${terminalName}"`,
           "info",
         );
         resolve(true);
       });
 
-      server.on("connection", hubHandleClient);
+      server.on("connection", (clientWs) => {
+        if (disposed) {
+          clientWs.close();
+          return;
+        }
+        hubHandleClient(clientWs);
+      });
 
       server.on("error", () => {
         // Port in use → someone else is the hub
@@ -716,6 +758,14 @@ export default function (pi: ExtensionAPI) {
       let resolved = false;
 
       socket.on("open", () => {
+        if (disposed) {
+          socket.close();
+          if (!resolved) {
+            resolved = true;
+            resolve(false);
+          }
+          return;
+        }
         ws = socket;
         role = "client";
         resolved = true;
@@ -731,19 +781,21 @@ export default function (pi: ExtensionAPI) {
       });
 
       socket.on("message", (raw) => {
+        if (!isRuntimeLive()) return;
         const msg = safeParse(raw.toString());
         if (msg) handleIncoming(msg);
       });
 
       socket.on("close", () => {
         ws = null;
+        if (disposed) return;
         if (role === "client") {
           role = "disconnected";
           connectedTerminals = [];
           updateStatus();
 
           if (!manuallyDisconnected) {
-            ctx?.ui.notify("Disconnected from link hub", "warning");
+            notify("Disconnected from link hub", "warning");
             scheduleReconnect();
           }
         }
@@ -843,7 +895,12 @@ export default function (pi: ExtensionAPI) {
 
   function cleanup() {
     disposed = true;
+    if (startupConnectTimer) {
+      clearTimeout(startupConnectTimer);
+      startupConnectTimer = null;
+    }
     disconnect();
+    ctx = undefined;
     // Full teardown: clear inbox and flush timer
     inbox.length = 0;
     if (flushTimer) {
@@ -858,12 +915,11 @@ export default function (pi: ExtensionAPI) {
     ctx = _ctx;
     currentCwd = _ctx.cwd;
 
-    // Resolve terminal name: --link-name flag > saved link-name > session name > random
-    const rawLinkName = pi.getFlag("link-name");
-    const flagName =
-      typeof rawLinkName === "string"
-        ? rawLinkName.trim().replace(/\s+/g, " ") || undefined
-        : undefined;
+    // Resolve terminal name: PI_LINK_NAME env > saved link-name > session name > random
+    const rawLinkName = process.env.PI_LINK_NAME;
+    delete process.env.PI_LINK_NAME;
+    const flagName = rawLinkName?.trim().replace(/\s+/g, " ") || undefined;
+
     if (flagName) {
       preferredName = flagName;
       terminalName = flagName;
@@ -886,7 +942,7 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    if (flagName || shouldConnect(_ctx)) await initialize();
+    if (flagName || shouldConnect(_ctx)) scheduleStartupConnect();
   });
 
   pi.on("session_shutdown", async () => {
