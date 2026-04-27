@@ -6,6 +6,14 @@ This changelog is based on the git history from `2026-03-21` (initial commit) th
 
 ---
 
+## 0.1.11 — 2026-04-27
+
+### Added
+
+- **`pi-link list` command.** Lists pi-link sessions in the current cwd. Use `--all` (or `-a`) to list sessions across all directories — adds a CWD column with `~` substituted for `$HOME`. Shows name, last-modified time, message count, and short ID. Sessions are detected by presence of a `link-name` entry. ANSI styling (bold headers, dim secondary columns) in TTY; plain when piped (`NO_COLOR` honored).
+
+---
+
 ## 0.1.10 — 2026-04-26
 
 ### Changed

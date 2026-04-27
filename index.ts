@@ -915,7 +915,9 @@ export default function (pi: ExtensionAPI) {
     ctx = _ctx;
     currentCwd = _ctx.cwd;
 
-    // Resolve terminal name: PI_LINK_NAME env > saved link-name > session name > random
+    // Resolve terminal name: PI_LINK_NAME env > saved link-name > session name > random.
+    // PI_LINK_NAME is an internal handoff from the `pi-link` CLI launcher.
+    // Consumed once here and removed from process.env so spawned children don't inherit it.
     const rawLinkName = process.env.PI_LINK_NAME;
     delete process.env.PI_LINK_NAME;
     const flagName = rawLinkName?.trim().replace(/\s+/g, " ") || undefined;
