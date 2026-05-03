@@ -6,6 +6,15 @@ This changelog is based on the git history from `2026-03-21` (initial commit) th
 
 ---
 
+## 0.1.13 — 2026-05-03
+
+### Fixed
+
+- **`pi-link resolve <name>` now rejects whitespace-only names.** Previously a name that normalized to empty (e.g. `pi-link resolve "   "`) fell through to session lookup and silently reported no match. The empty-name check that already covered `pi-link <name>` now also runs in `resolve`, printing usage and exiting non-zero.
+- **README wording: session-dir lookup phrasing tightened** to say "matches Pi's lookup order" instead of "mirrors Pi's".
+
+---
+
 ## 0.1.12 — 2026-05-03
 
 ### Changed
