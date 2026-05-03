@@ -324,6 +324,10 @@ if (command === "list") {
     process.exit(1);
   }
   const name = positional[0].trim().replace(/\s+/g, " ");
+  if (!name) {
+    console.error("Usage: pi-link resolve <name> [--global|-g]");
+    process.exit(1);
+  }
   const { dir, isCustom } = resolveSessionDir(process.cwd(), resolveAgentDir());
   const { local, all } = await findSessionsByName(name, dir, isCustom);
   const matches = global ? all : local;
