@@ -103,7 +103,7 @@ Here's a concrete example of two terminals collaborating. Open two separate `pi 
 
 ```
 > /link-name researcher
-✓ Reconnecting as "researcher" (hub may assign a different name if taken)...
+✓ Reconnecting, requesting "researcher" (hub may assign a different name if taken)...
 ```
 
 **Now ask Terminal 1's LLM to delegate work:**
@@ -157,16 +157,18 @@ pi-link worker-1                # resume or create session "worker-1"
 pi-link worker-1 --model sonnet # with extra Pi flags
 ```
 
-How it works: `pi-link worker-1` scans `~/.pi/agent/sessions/`, finds the session named "worker-1", and spawns `pi --session <path> --link`.
+How it works: `pi-link worker-1` scans Pi's session directory, finds the session named "worker-1", and spawns `pi --session <path> --link`. Session-dir resolution mirrors Pi's: `PI_CODING_AGENT_SESSION_DIR` env > `<cwd>/.pi/settings.json` `sessionDir` > `<agentDir>/settings.json` `sessionDir` > default `<agentDir>/sessions/`. `<agentDir>` follows `PI_CODING_AGENT_DIR` and defaults to `~/.pi/agent/`.
 
-- **One match** → resumes that session
-- **No match** → creates a new session
-- **Multiple matches** → prints candidates to stderr, exits 1
+Lookup is **scoped to the current cwd by default**; pass `--global` (`-g`) to consider sessions in any cwd.
+
+- **One match in scope** → resumes that session
+- **No match in scope** → creates a new session in the current cwd. If matches exist outside the scope, prints a hint pointing at `--global`.
+- **Multiple matches in scope** → prints candidates to stderr, exits 1
 - **Conflicting flags** (`--session`, `--continue`, `--resume`, `--fork`, etc.) → rejected with an error
 
 ### Discovering sessions
 
-`pi-link list` shows pi-link sessions in the current cwd; `pi-link list --all` (or `-a`) lists them across all directories. Sorted by last activity.
+`pi-link list` shows pi-link sessions in the current cwd; `pi-link list --global` (or `-g`) lists them across all directories. Sorted by last activity.
 
 ```
 $ pi-link list
@@ -177,10 +179,10 @@ gpt@pi-link      5m ago    1493      20d43841
 Resume: pi-link <name>
 ```
 
-With `--all`:
+With `--global`:
 
 ```
-$ pi-link list --all
+$ pi-link list --global
 NAME             CWD                   MODIFIED  MESSAGES  ID
 opus@pi-link     ~/my-project          2m ago    4632      6332faab
 gpt@pi-link      ~/other-project       5m ago    1493      20d43841
@@ -188,7 +190,9 @@ gpt@pi-link      ~/other-project       5m ago    1493      20d43841
 Resume: pi-link <name>
 ```
 
-`--all` adds a `CWD` column with `~` substituted for `$HOME`. Output is plain when piped (`NO_COLOR` honored).
+`--global` adds a `CWD` column with `~` substituted for `$HOME`. Output is plain when piped (`NO_COLOR` honored).
+
+`pi-link <name>` and `pi-link resolve <name>` follow the same scoping: local cwd by default, `--global` (or `-g`) widens. When `pi-link <name>` finds no local match but matches exist elsewhere, it warns and points at `--global` instead of silently jumping cwds.
 
 For scripting, `pi-link resolve <name>` prints just the session path (machine-readable, no other output).
 
@@ -426,7 +430,7 @@ When the hub goes down and a client promotes itself, terminal names and in-fligh
 | ------------------------------- | ------------------------------------------------ |
 | `@mariozechner/pi-coding-agent` | Pi SDK types (ExtensionAPI, ExtensionContext)    |
 | `@mariozechner/pi-tui`          | TUI Text widget for custom message rendering     |
-| `@sinclair/typebox`             | JSON Schema type definitions for tool parameters |
+| `typebox`                       | JSON Schema type definitions for tool parameters |
 
 ### `package.json`
 
@@ -526,8 +530,6 @@ The hub enforces unique terminal names via a `uniqueName()` function. If `"build
 Default names are random 4-character hex IDs: `t-a1b2`, `t-c3d4`, etc.
 
 **Persistence:** `/link-name` saves the preferred name to the session via `pi.appendEntry("link-name", { name })`. On session resume, the saved name is restored and requested from the hub. Only explicit `/link-name` calls persist - hub-assigned variants like `"builder-2"` are not saved. On reconnect, the terminal always requests the preferred name, not the last runtime name.
-
-**Internal handoff (`PI_LINK_NAME`):** the `pi-link` launcher passes the chosen name to Pi via the `PI_LINK_NAME` environment variable. The extension reads it once on `session_start` and immediately removes it from `process.env` so child processes don't inherit it. This is an internal mechanism — don't set `PI_LINK_NAME` manually; use `pi-link <name>` to start a session or `/link-name` to rename mid-session.
 
 **Rename guards:**
 

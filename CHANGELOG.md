@@ -6,6 +6,23 @@ This changelog is based on the git history from `2026-03-21` (initial commit) th
 
 ---
 
+## 0.1.12 — 2026-05-03
+
+### Changed
+
+- **TypeBox import migrated from `@sinclair/typebox` to `typebox`.** Pi 0.69.0 renamed the package; both names still resolve to the same module via Pi's loader alias, so behavior is unchanged. Aligns with Pi's preferred naming and futureproofs against alias removal. README's "Provided by Pi" table updated to match.
+
+### Fixed
+
+- **`pi-link list/resolve/<name>` now respect Pi's session-dir configuration.** The CLI hardcoded `~/.pi/agent/sessions` and ignored Pi's actual lookup chain, so users with a custom session location saw "no sessions" from `list`/`resolve` and — worse — `pi-link <name>` silently started a new session instead of resuming the existing one, fragmenting history into orphans across the real session dir. Resolution now matches Pi's lookup order (minus `--session-dir`, which the CLI rejects): `PI_CODING_AGENT_SESSION_DIR` → `<cwd>/.pi/settings.json` `sessionDir` → `<agentDir>/settings.json` `sessionDir` → default `<agentDir>/sessions/<encoded-cwd>`. `<agentDir>` follows `PI_CODING_AGENT_DIR`. Tilde expansion (`~`, `~/...`) matches Pi's `expandTildePath`. Custom layouts are scanned flat; default keeps the encoded-cwd subdirs. Malformed `settings.json` warns to stderr and falls through. Empty env vars and empty/non-string `sessionDir` values are treated as absent.
+- **`pi-link <name>` now rejects Pi-managed flags even when passed as the first token.** Previously `pi-link --link-name foo` or `pi-link --session path` silently treated the flag as a session name. The validation that already covered later flags now also runs on the first token, with the same error messages.
+- **`pi-link <name>` and `pi-link resolve <name>` now scope name lookup to the current cwd by default; `--global` / `-g` widens to any cwd.** Previously both commands scanned every session everywhere, so `pi-link work` from `~/projects/A` would silently resume `~/projects/B`'s `work` session if no local match existed — mixing one cwd's files into another cwd's session history. By default only current-cwd matches are considered; `--global` restores cross-cwd lookup, with duplicate exact names still failing with candidates. When `pi-link <name>` finds no local match but matches exist elsewhere, it warns and points at `--global` instead of silently jumping. `--global` may be passed before or after the name. `pi-link resolve` now also rejects extra positional arguments and unknown flags. **Breaking change**: `pi-link list --all` is renamed to `pi-link list --global` (`-a` → `-g`) for consistency across the three commands. As a transition aid, `--all` / `-a` are explicitly rejected with a pointer to the new flag name (mirroring the `--link-name was removed` treatment) so users with muscle memory get a clear hint instead of a generic "Unknown argument".
+- **Hub now uses its authoritative socket→name mapping when forwarding chat/prompt messages.** Previously the hub forwarded `chat`, `prompt_request`, and `prompt_response` with whatever `from` the client claimed, while normalizing `status_update` against its socket→name mapping. The asymmetry meant a client with a stale or optimistic local `terminalName` could leak the wrong sender to other terminals — and under a rename-to-taken-name race, prompt responses could route back to the wrong terminal entirely. Hub now spread-normalizes `from` for all routed client messages, matching the existing `status_update` pattern.
+- **`/link-name` no longer updates local `terminalName` before the hub confirms the rename.** Previously the client branch optimistically set `terminalName = newName` before reconnect, so during the close→reconnect→welcome window `/link` and `link_list` would report the requested name even if the hub later deduped it. Local identity now stays at the pre-rename value until `welcome` arrives. Notification wording updated from "Reconnecting as" to "Reconnecting, requesting" to reflect that the hub may assign a different name.
+- **Hub promotion now preserves a pending client rename request.** Same-release follow-up to the previous bullet: with `terminalName` no longer updated optimistically, a client whose previous hub vanished mid-rename and who then wins hub promotion via `startHub` would otherwise have announced under the old local name. A `pendingClientRename` flag, set in `/link-name` and cleared on `welcome`, lets `startHub` adopt the requested name only when a rename was in flight. Hub-assigned deduped names from prior welcomes are otherwise preserved — no general `preferredName` replay.
+
+---
+
 ## 0.1.11 — 2026-04-27
 
 ### Added

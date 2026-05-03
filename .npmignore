@@ -1,6 +1,3 @@
+.vscode/
 node_modules/
-STYLE.md
 sync.ffs_db
-PLAN-*.md
-REPORT-*.md
-*.tgz

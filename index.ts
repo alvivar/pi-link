@@ -15,7 +15,7 @@ import type {
   ExtensionContext,
 } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import * as crypto from "node:crypto";
 import * as os from "node:os";
 
@@ -120,6 +120,9 @@ export default function (pi: ExtensionAPI) {
   let role: "hub" | "client" | "disconnected" = "disconnected";
   let terminalName = `t-${crypto.randomUUID().slice(0, 4)}`;
   let preferredName: string | null = null;
+  // True between a client `/link-name` close and the next welcome/promotion.
+  // Lets `startHub` adopt the requested name if it wins promotion before welcome.
+  let pendingClientRename = false;
   let connectedTerminals: string[] = [];
   let ctx: ExtensionContext | undefined;
   let disposed = false;
@@ -481,6 +484,7 @@ export default function (pi: ExtensionAPI) {
       // ── Client receives after registering ──
       case "welcome":
         terminalName = msg.name;
+        pendingClientRename = false;
         connectedTerminals = msg.terminals;
         terminalStatuses.clear();
         terminalCwds.clear();
@@ -676,13 +680,15 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      // Route chat / prompt messages
+      // Route chat / prompt messages.
+      // Normalize `from` to the hub's authoritative socket→name mapping,
+      // mirroring the status_update path above. Don't trust the client.
       if (
         msg.type === "chat" ||
         msg.type === "prompt_request" ||
         msg.type === "prompt_response"
       ) {
-        routeMessage(msg);
+        routeMessage({ ...msg, from: clientName });
       }
     });
 
@@ -725,6 +731,12 @@ export default function (pi: ExtensionAPI) {
           return;
         }
         wss = server;
+        // If a client `/link-name` was in flight when the previous hub vanished,
+        // this terminal is now establishing hub identity, so honor that pending
+        // request. Otherwise keep the last hub-assigned identity — don't replay
+        // a stale `preferredName` that may already have been deduped.
+        if (pendingClientRename && preferredName) terminalName = preferredName;
+        pendingClientRename = false;
         role = "hub";
         connectedTerminals = [terminalName];
         updateStatus();
@@ -1395,13 +1407,13 @@ export default function (pi: ExtensionAPI) {
         savePreference();
         _ctx.ui.notify(`Renamed to "${newName}"`, "info");
       } else if (role === "client") {
-        // Reconnect with new name — hub will enforce uniqueness via register
+        // Don't update terminalName here — welcome will assign authoritatively
+        // after reconnect. Hub may dedupe newName to newName-2 if taken.
         savePreference();
-        terminalName = newName;
+        pendingClientRename = true;
         ws?.close();
-        // Reconnect will happen via the onClose handler → scheduleReconnect
         _ctx.ui.notify(
-          `Reconnecting as "${newName}" (hub may assign a different name if taken)...`,
+          `Reconnecting, requesting "${newName}" (hub may assign a different name if taken)...`,
           "info",
         );
       } else {
