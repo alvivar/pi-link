@@ -2,7 +2,7 @@
  * Pi Link — WebSocket-based inter-terminal communication
  *
  * Connects multiple Pi terminals over a local WebSocket link.
- * Opt-in via --link flag, pi-link CLI, or /link-connect command.
+ * Opt-in via --link flag, --link-name flag, pi-link CLI, or /link-connect command.
  * First terminal to connect becomes the hub; others join as clients.
  * Hub loss triggers automatic promotion of a surviving client.
  *
@@ -113,6 +113,12 @@ export default function (pi: ExtensionAPI) {
     description: "Connect to link on startup",
     type: "boolean",
     default: false,
+  });
+
+  pi.registerFlag("link-name", {
+    description:
+      "Set the pi-link terminal name on startup (link identity only; does not affect session)",
+    type: "string",
   });
 
   // ── State ────────────────────────────────────────────────────────────────
@@ -927,18 +933,56 @@ export default function (pi: ExtensionAPI) {
     ctx = _ctx;
     currentCwd = _ctx.cwd;
 
-    // Resolve terminal name: PI_LINK_NAME env > saved link-name > session name > random.
-    // PI_LINK_NAME is an internal handoff from the `pi-link` CLI launcher.
-    // Consumed once here and removed from process.env so spawned children don't inherit it.
-    const rawLinkName = process.env.PI_LINK_NAME;
+    // Resolve terminal name. Precedence:
+    //   --link-name flag  >  PI_LINK_NAME env  >  saved link-name  >  session name  >  random
+    //
+    // --link-name is the public CLI surface (link identity only, never touches session name).
+    // PI_LINK_NAME is the internal handoff from the `pi-link` wrapper, which DOES
+    // seed session name when absent (the wrapper's combined-mode contract).
+    // PI_LINK_NAME is consumed once and removed from process.env so spawned children don't inherit it.
+    const cliRaw = pi.getFlag("link-name");
+    let cliFlagName: string | undefined;
+    if (typeof cliRaw === "string") {
+      cliFlagName = cliRaw.trim().replace(/\s+/g, " ");
+      if (!cliFlagName) {
+        console.error("Error: --link-name requires a non-empty value.");
+        process.exit(1);
+      }
+    }
+
+    const envRaw = process.env.PI_LINK_NAME;
     delete process.env.PI_LINK_NAME;
-    const flagName = rawLinkName?.trim().replace(/\s+/g, " ") || undefined;
+    const envFlagName = envRaw?.trim().replace(/\s+/g, " ") || undefined;
+
+    const flagName = cliFlagName ?? envFlagName;
+    const fromEnv = !cliFlagName && !!envFlagName;
 
     if (flagName) {
       preferredName = flagName;
       terminalName = flagName;
-      pi.appendEntry("link-name", { name: flagName });
-      if (!pi.getSessionName()) pi.setSessionName(flagName);
+
+      // Skip append if the saved name already matches; persistence is needed
+      // only for first-time set or actual change. Reduces session-file growth
+      // on repeated startups (common in automation).
+      let latestSaved: string | undefined;
+      const entries = _ctx.sessionManager.getEntries();
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const e = entries[i] as {
+          type: string;
+          customType?: string;
+          data?: { name?: unknown };
+        };
+        if (e.type !== "custom" || e.customType !== "link-name") continue;
+        if (typeof e.data?.name === "string") latestSaved = e.data.name;
+        break;
+      }
+      if (latestSaved?.trim().replace(/\s+/g, " ") !== flagName) {
+        pi.appendEntry("link-name", { name: flagName });
+      }
+
+      // Critical: only the env path (wrapper combined mode) seeds session name.
+      // Public --link-name is link-only.
+      if (fromEnv && !pi.getSessionName()) pi.setSessionName(flagName);
     } else {
       const saved = _ctx.sessionManager
         .getEntries()

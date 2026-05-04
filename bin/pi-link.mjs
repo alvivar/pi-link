@@ -245,13 +245,19 @@ function rejectRenamedFlag(token) {
   }
 }
 
-// Reject Pi flags that pi-link manages, plus the removed --link-name extension flag.
+// Reject Pi flags that pi-link manages, plus --link-name (which exists at the
+// `pi` level for link-only naming, but the wrapper's combined-mode contract
+// conflicts with it).
 // Runs on both the first token (so `pi-link --session foo` errors clearly) and on each
 // flag in args (so `pi-link foo --session bar` does too).
 function rejectManagedFlag(token) {
   const key = token.split("=")[0];
   if (key === "--link-name") {
-    console.error("Error: --link-name was removed. Use: pi-link <name>");
+    console.error(
+      "Error: --link-name is not accepted by the pi-link wrapper.\n" +
+      "  Use 'pi-link <name>' for combined link+session,\n" +
+      "  or run 'pi --link-name <name>' directly to set link name without session resolution.",
+    );
     process.exit(1);
   }
   if (["--session", "--continue", "-c", "--resume", "-r", "--fork", "--no-session", "--session-dir"].includes(key)) {
