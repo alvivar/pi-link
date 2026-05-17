@@ -6,9 +6,17 @@ This changelog is based on the git history from `2026-03-21` (initial commit) th
 
 ---
 
-## 0.1.15-beta.0 — 2026-05-17
+## 0.1.15-beta.1 — 2026-05-17
 
-Beta release for the 0.1.15 cycle. Install with `npm i -g pi-link@beta` for soak; `npm i -g pi-link` continues to install 0.1.14. Promotion to `latest` after smoke + at least one external user confirmation.
+First recommended beta of the 0.1.15 cycle. Install with `npm i -g pi-link@beta`. The `latest` tag still points at 0.1.14. Promotion to `latest` after smoke + at least one external user confirmation.
+
+_Supersedes `0.1.15-beta.0`, which was pulled within hours due to a peer-dep namespace bug. See the `0.1.15-beta.0` entry below for the postmortem._
+
+### Breaking
+
+- **Pi 0.74+ is now required.** Runtime imports and peer dependencies use the `@earendil-works/*` namespace introduced in Pi 0.74. Users on Pi ≤0.73 should pin `pi-link@0.1.14` (still on the `latest` tag).
+  - `index.ts`: imports `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui`
+  - `package.json` peer deps: `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` at `>=0.74.0`
 
 ### Added
 
@@ -20,21 +28,20 @@ Beta release for the 0.1.15 cycle. Install with `npm i -g pi-link@beta` for soak
   pi-link --resolve=<name>
   ```
 
+- **Pi-bundled imports declared as peer dependencies** (using the new `@earendil-works/*` namespace, satisfied natively by Pi 0.74+). Previously only `ws` was declared, so consumers whose toolchain didn't auto-resolve modules through Pi's loader (e.g. some Docker setups) hit `ERR_MODULE_NOT_FOUND` on `typebox`. With modern npm/pnpm, peer deps auto-install when not provided by a parent.
+
 ### Changed
 
 - **`pi-link --resolve <missing-name>` now exits with code `2`** (was `0`). Single match still exits `0`; ambiguous still exits `1`; not found is now distinguishable from success in scripts. The legacy `pi-link resolve <missing-name>` form gets the same fix.
 - **`pi-link <name> <extra-positional>` now errors** instead of silently passing the extra to Pi as a prompt. Catches typos like `pi-link resolv foo`. Tokens that follow a flag without `=` are still accepted as that flag's value (e.g. `pi-link worker --model opus` works). Use `--` to pass bare positionals through unchanged: `pi-link worker -- some-arg`.
 - **`pi-link foo --help` now errors** with "cannot combine session name and --help" instead of silently passing `--help` to Pi. Run `pi --help` for Pi's own help.
+- **Published tarball trimmed to 7 files / 39.7 kB** (was 18 files / 87.5 kB on beta.0). Explicit `files` allowlist in `package.json` so internal planning artifacts (`PLAN-*.md`, `PROPOSAL-*.md`, `REPORT-*.md`, `REQUEST-*.md`) and the test harness no longer ship to npm. Users get `bin/`, `skills/`, `index.ts`, `README.md`, `CHANGELOG.md`, `LICENSE`, and `package.json`.
 
 ### Deprecated
 
 - **`pi-link list` and `pi-link resolve` subcommands.** Use `--list` / `--resolve` instead. Subcommands still work for one release with a stderr deprecation warning, then will be removed. The `--global` flag placement is more flexible in the deprecated `resolve` form than the canonical `--resolve` form: `pi-link resolve --global foo` is still accepted, while `pi-link --resolve --global foo` is an error (use `pi-link --resolve foo --global` or `--resolve=foo --global`).
 
-### Fixed
-
-- **Pi-bundled imports now declared as peer dependencies.** `package.json` adds `@mariozechner/pi-coding-agent`, `@mariozechner/pi-tui`, and `typebox` as `peerDependencies` with `"*"` ranges, matching Pi's `docs/packages.md` convention for packages that import Pi-bundled modules. Previously only `ws` was declared, so consumers whose toolchain didn't auto-resolve modules through Pi's loader (e.g. some Docker setups) hit `ERR_MODULE_NOT_FOUND` on `typebox`. With modern npm/pnpm, peer deps auto-install alongside the package; older toolchains may need explicit `npm install`.
-
-### Migration
+### Migration from 0.1.14
 
 All existing scripts and aliases continue to work — the deprecated subcommands print a stderr warning but produce identical output (and the new exit-code 2 on missing resolve). Scripts that depended on `pi-link resolve <name>` returning exit 0 for missing names need updating to handle 2. Most callers already treated empty stdout as "not found" and will be unaffected.
 
@@ -51,6 +58,16 @@ To silence the deprecation warning, switch to the flag form:
 ### Test coverage
 
 40 automated cases in `test/cli-flags-test.mjs` covering: canonical forms (5), deprecation aliases (4), orphan-positional rejection (7), mode-selecting validation (11), help / unknown / managed-flag rejection (8), wrapper-vs-pi flag boundaries (4). Cases that exercise the launch path use a stubbed `pi` on PATH that records argv + `PI_LINK_NAME`. Run with `node test/cli-flags-test.mjs`.
+
+---
+
+## 0.1.15-beta.0 — 2026-05-17 _(pulled — do not install)_
+
+Initial 0.1.15 beta. Replaced within hours by `0.1.15-beta.1`.
+
+**Issue:** peer dependencies still pointed at the old `@mariozechner/*` namespace, which Pi 0.74 no longer publishes. `npm install` on a Pi-0.74+ machine auto-pulled the tombstoned `@mariozechner/*@0.73.1` packages (203 transitive deps) and printed four npm deprecation warnings (`pi-agent-core`, `pi-tui`, `pi-ai`, `pi-coding-agent`).
+
+**Resolution:** migrated to `@earendil-works/*` namespace in `0.1.15-beta.1`. See that entry for the full 0.1.15 feature set.
 
 ---
 

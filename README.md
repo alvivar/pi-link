@@ -36,7 +36,7 @@ A single Pi terminal is powerful. Multiple terminals working together unlock new
 
 ## Prerequisites
 
-- [Pi coding agent](https://github.com/badlogic/pi-mono) installed and working
+- [Pi coding agent](https://github.com/badlogic/pi-mono), version **0.74 or later** (for pi-link 0.1.15+). On Pi ≤0.73, pin `pi-link@0.1.14`.
 - Node.js (LTS recommended)
 
 ---
@@ -431,11 +431,13 @@ When the hub goes down and a client promotes itself, terminal names and in-fligh
 
 ### Provided by Pi (no install needed)
 
-| Package                         | Purpose                                          |
-| ------------------------------- | ------------------------------------------------ |
-| `@mariozechner/pi-coding-agent` | Pi SDK types (ExtensionAPI, ExtensionContext)    |
-| `@mariozechner/pi-tui`          | TUI Text widget for custom message rendering     |
-| `typebox`                       | JSON Schema type definitions for tool parameters |
+| Package                           | Purpose                                          |
+| --------------------------------- | ------------------------------------------------ |
+| `@earendil-works/pi-coding-agent` | Pi SDK types (ExtensionAPI, ExtensionContext)    |
+| `@earendil-works/pi-tui`          | TUI Text widget for custom message rendering     |
+| `typebox`                         | JSON Schema type definitions for tool parameters |
+
+> **Pi version requirement:** pi-link 0.1.15+ requires Pi 0.74 or later (the `@earendil-works/*` namespace). Users on Pi 0.73 or earlier should pin `pi-link@0.1.14`.
 
 ### `package.json`
 
