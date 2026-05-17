@@ -171,10 +171,10 @@ Lookup is **scoped to the current cwd by default**; pass `--global` (`-g`) to co
 
 ### Discovering sessions
 
-`pi-link list` shows pi-link sessions in the current cwd; `pi-link list --global` (or `-g`) lists them across all directories. Sorted by last activity — starting a session with the same name it already has does not bump recency; only real activity (messages, tool calls, edits, name changes) does.
+`pi-link --list` shows pi-link sessions in the current cwd; `pi-link --list --global` (or `-g`) lists them across all directories. Sorted by last activity — starting a session with the same name it already has does not bump recency; only real activity (messages, tool calls, edits, name changes) does.
 
 ```
-$ pi-link list
+$ pi-link --list
 NAME             MODIFIED  MESSAGES  ID
 opus@pi-link     2m ago    4632      6332faab
 gpt@pi-link      5m ago    1493      20d43841
@@ -185,7 +185,7 @@ Resume: pi-link <name>
 With `--global`:
 
 ```
-$ pi-link list --global
+$ pi-link --list --global
 NAME             CWD                   MODIFIED  MESSAGES  ID
 opus@pi-link     ~/my-project          2m ago    4632      6332faab
 gpt@pi-link      ~/other-project       5m ago    1493      20d43841
@@ -195,9 +195,11 @@ Resume: pi-link <name>
 
 `--global` adds a `CWD` column with `~` substituted for `$HOME`. Output is plain when piped (`NO_COLOR` honored).
 
-`pi-link <name>` and `pi-link resolve <name>` follow the same scoping: local cwd by default, `--global` (or `-g`) widens. When `pi-link <name>` finds no local match but matches exist elsewhere, it warns and points at `--global` instead of silently jumping cwds.
+`pi-link <name>` and `pi-link --resolve <name>` follow the same scoping: local cwd by default, `--global` (or `-g`) widens. When `pi-link <name>` finds no local match but matches exist elsewhere, it warns and points at `--global` instead of silently jumping cwds.
 
-For scripting, `pi-link resolve <name>` prints just the session path (machine-readable, no other output).
+For scripting, `pi-link --resolve <name>` prints just the session path (machine-readable, no other output). Exit codes: `0` on single match, `1` if ambiguous (multiple matches printed to stderr), `2` if not found.
+
+> The legacy subcommand forms `pi-link list` and `pi-link resolve <name>` still work but print a stderr deprecation warning and will be removed in a future release. Switch to the flag forms above.
 
 ---
 

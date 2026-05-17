@@ -1,6 +1,6 @@
 {
   "name": "pi-link",
-  "version": "0.1.14",
+  "version": "0.1.15-beta.0",
   "description": "WebSocket-based inter-terminal communication for Pi. Connect multiple Pi terminals over a local link network.",
   "author": "alvivar",
   "license": "MIT",
@@ -21,6 +21,11 @@
   ],
   "dependencies": {
     "ws": "^8.20.0"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "typebox": "*"
   },
   "devDependencies": {
     "@types/ws": "^8.18.1"

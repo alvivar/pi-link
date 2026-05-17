@@ -6,6 +6,54 @@ This changelog is based on the git history from `2026-03-21` (initial commit) th
 
 ---
 
+## 0.1.15-beta.0 — 2026-05-17
+
+Beta release for the 0.1.15 cycle. Install with `npm i -g pi-link@beta` for soak; `npm i -g pi-link` continues to install 0.1.14. Promotion to `latest` after smoke + at least one external user confirmation.
+
+### Added
+
+- **`--list` and `--resolve <name>` flag forms for the `pi-link` CLI wrapper.** Use instead of the `list` / `resolve` subcommands. `--resolve=<name>` joined form also accepted. This fixes the reserved-word collision that prevented sessions named `list` or `resolve`, and the silent-typo failure mode where `pi-link resolv foo` would create a session called `resolv` and pass `foo` as a prompt to Pi.
+
+  ```
+  pi-link --list [--global|-g]
+  pi-link --resolve <name> [--global|-g]
+  pi-link --resolve=<name>
+  ```
+
+### Changed
+
+- **`pi-link --resolve <missing-name>` now exits with code `2`** (was `0`). Single match still exits `0`; ambiguous still exits `1`; not found is now distinguishable from success in scripts. The legacy `pi-link resolve <missing-name>` form gets the same fix.
+- **`pi-link <name> <extra-positional>` now errors** instead of silently passing the extra to Pi as a prompt. Catches typos like `pi-link resolv foo`. Tokens that follow a flag without `=` are still accepted as that flag's value (e.g. `pi-link worker --model opus` works). Use `--` to pass bare positionals through unchanged: `pi-link worker -- some-arg`.
+- **`pi-link foo --help` now errors** with "cannot combine session name and --help" instead of silently passing `--help` to Pi. Run `pi --help` for Pi's own help.
+
+### Deprecated
+
+- **`pi-link list` and `pi-link resolve` subcommands.** Use `--list` / `--resolve` instead. Subcommands still work for one release with a stderr deprecation warning, then will be removed. The `--global` flag placement is more flexible in the deprecated `resolve` form than the canonical `--resolve` form: `pi-link resolve --global foo` is still accepted, while `pi-link --resolve --global foo` is an error (use `pi-link --resolve foo --global` or `--resolve=foo --global`).
+
+### Fixed
+
+- **Pi-bundled imports now declared as peer dependencies.** `package.json` adds `@mariozechner/pi-coding-agent`, `@mariozechner/pi-tui`, and `typebox` as `peerDependencies` with `"*"` ranges, matching Pi's `docs/packages.md` convention for packages that import Pi-bundled modules. Previously only `ws` was declared, so consumers whose toolchain didn't auto-resolve modules through Pi's loader (e.g. some Docker setups) hit `ERR_MODULE_NOT_FOUND` on `typebox`. With modern npm/pnpm, peer deps auto-install alongside the package; older toolchains may need explicit `npm install`.
+
+### Migration
+
+All existing scripts and aliases continue to work — the deprecated subcommands print a stderr warning but produce identical output (and the new exit-code 2 on missing resolve). Scripts that depended on `pi-link resolve <name>` returning exit 0 for missing names need updating to handle 2. Most callers already treated empty stdout as "not found" and will be unaffected.
+
+To silence the deprecation warning, switch to the flag form:
+
+| Old                            | New                                                                |
+| ------------------------------ | ------------------------------------------------------------------ |
+| `pi-link list`                 | `pi-link --list`                                                   |
+| `pi-link list -g`              | `pi-link --list -g`                                                |
+| `pi-link resolve foo`          | `pi-link --resolve foo`                                            |
+| `pi-link resolve foo -g`       | `pi-link --resolve foo -g`                                         |
+| `pi-link resolve --global foo` | `pi-link --resolve foo --global` (order matters in canonical form) |
+
+### Test coverage
+
+40 automated cases in `test/cli-flags-test.mjs` covering: canonical forms (5), deprecation aliases (4), orphan-positional rejection (7), mode-selecting validation (11), help / unknown / managed-flag rejection (8), wrapper-vs-pi flag boundaries (4). Cases that exercise the launch path use a stubbed `pi` on PATH that records argv + `PI_LINK_NAME`. Run with `node test/cli-flags-test.mjs`.
+
+---
+
 ## 0.1.14 — 2026-05-04
 
 ### Added
@@ -31,7 +79,7 @@ This changelog is based on the git history from `2026-03-21` (initial commit) th
 
 ### Changed
 
-- **TypeBox import migrated from `@sinclair/typebox` to `typebox`.** Pi 0.69.0 renamed the package; both names still resolve to the same module via Pi's loader alias, so behavior is unchanged. Aligns with Pi's preferred naming and futureproofs against alias removal. README's "Provided by Pi" table updated to match.
+- **TypeBox import migrated from `@sinclair/typebox` to `typebox`.** Pi 0.69.0 migrated to typebox 1.x's bare-package name; `@sinclair/typebox` still resolves to the same module via Pi's legacy alias, so behavior is unchanged for our root `Type.*` imports. Aligns with Pi's preferred naming and avoids future churn if the alias is dropped. README's "Provided by Pi" table updated to match.
 
 ### Fixed
 

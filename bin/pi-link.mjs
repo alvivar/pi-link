@@ -5,9 +5,12 @@
 // Usage:
 //   pi-link <name> [--global|-g] [flags...]
 //                                Resume or create a named session, connected to link.
-//   pi-link list [--global|-g]   List pi-link sessions in current cwd (or everywhere).
-//   pi-link resolve <name> [--global|-g]
+//   pi-link --list [--global|-g] List pi-link sessions in current cwd (or everywhere).
+//   pi-link --resolve <name> [--global|-g]
 //                                Print just the session path (machine-readable).
+//
+// Deprecated subcommand forms `pi-link list` / `pi-link resolve <name>` still
+// work for one release with a stderr warning.
 
 import { readdir, stat } from "fs/promises";
 import { createReadStream, existsSync, readFileSync } from "fs";
@@ -232,7 +235,7 @@ function renderTable(rows, columns) {
 
 // ── CLI ────────────────────────────────────────────────────────────────────
 
-const [command, ...args] = process.argv.slice(2);
+const rawArgs = process.argv.slice(2);
 
 // Reject pi-link flags renamed in 0.1.12 with a clear pointer to the new name.
 // Same intent as `rejectManagedFlag` (specific message > generic "Unknown argument")
@@ -247,9 +250,9 @@ function rejectRenamedFlag(token) {
 
 // Reject Pi flags that pi-link manages, plus --link-name (which exists at the
 // `pi` level for link-only naming, but the wrapper's combined-mode contract
-// conflicts with it).
-// Runs on both the first token (so `pi-link --session foo` errors clearly) and on each
-// flag in args (so `pi-link foo --session bar` does too).
+// conflicts with it). Called from Phase 6 (mode entry) and Phase 7 (after
+// launcher name), so it fires on both `pi-link --session foo` and
+// `pi-link foo --session bar` with the friendly message.
 function rejectManagedFlag(token) {
   const key = token.split("=")[0];
   if (key === "--link-name") {
@@ -276,25 +279,243 @@ function printCandidates(name, matches) {
   process.exit(1);
 }
 
-if (command === "list") {
-  let global = false;
-  for (const a of args) {
-    rejectRenamedFlag(a);
-    if (a === "--global" || a === "-g") global = true;
-    else {
-      console.error(`Unknown argument: ${a}`);
-      console.error("Usage: pi-link list [--global|-g]");
-      process.exit(1);
+function fail(msg) {
+  console.error(`Error: ${msg}`);
+  process.exit(1);
+}
+
+function printHelp() {
+  console.error("Usage: pi-link <name> [--global|-g] [pi flags...]");
+  console.error("       pi-link --list [--global|-g]");
+  console.error("       pi-link --resolve <name> [--global|-g]");
+  console.error("");
+  console.error("By default, name lookup is scoped to the current cwd.");
+  console.error("--global / -g widens the search to sessions in any cwd.");
+}
+
+function printDeprecationWarning(form) {
+  const canonical = form === "list" ? "--list" : "--resolve";
+  console.error(
+    `Warning: 'pi-link ${form}' is deprecated. Use 'pi-link ${canonical}' instead. ` +
+    `(Subcommand form will be removed in a future release.)`,
+  );
+}
+
+function describeMode(mode) {
+  switch (mode) {
+    case "help": return "--help";
+    case "list": return "--list";
+    case "resolve": return "--resolve";
+    case "launcher": return "session name";
+    default: return mode;
+  }
+}
+
+// ── Parser ─────────────────────────────────────────────────────────────────
+//
+// Single sequential pass populates `state`; dispatcher reads it. Phases (per
+// PLAN-cli-flags.md):
+//   1. Renamed-flag rejection (always-on for --all/-a)
+//   2. Global flags (--global, --help, --)
+//   3. Mode-selecting flags (--list, --resolve, --resolve=<name>)
+//   4. Deprecated subcommands (list, resolve <name>) — only at mode-null position
+//   5. Mode-specific extra-token rejection (with deprecated-resolve leniency)
+//   6. Launcher mode entry (mode null + bare positional)
+//   7. Launcher passthrough (mode launcher) with orphan-positional rejection
+
+const state = {
+  mode: null, // null | "help" | "list" | "resolve" | "launcher"
+  resolveName: null,
+  launcherName: null,
+  global: false,
+  piPassthrough: [],
+  deprecated: null, // null | "list" | "resolve"
+};
+
+function setMode(mode) {
+  if (state.mode !== null && state.mode !== mode) {
+    fail(`cannot combine ${describeMode(state.mode)} and ${describeMode(mode)}`);
+  }
+  state.mode = mode;
+}
+
+let lastWasFlag = false;
+
+for (let i = 0; i < rawArgs.length; i++) {
+  const a = rawArgs[i];
+
+  // Phase 1: renamed-flag rejection.
+  rejectRenamedFlag(a);
+
+  // Phase 2: global flags / scope-affecting tokens.
+  if (a === "--global" || a === "-g") {
+    state.global = true;
+    lastWasFlag = false;
+    continue;
+  }
+  if (a === "--help" || a === "-h") {
+    setMode("help"); // errors if combined with another mode
+    continue;
+  }
+  if (a === "--") {
+    // `--` only meaningful in launcher mode (separates pi flags from positionals).
+    if (state.mode !== "launcher") {
+      fail(`-- is only valid after a session name`);
     }
+    for (let j = i + 1; j < rawArgs.length; j++) {
+      state.piPassthrough.push(rawArgs[j]);
+    }
+    i = rawArgs.length;
+    break;
   }
-  const { dir, isCustom } = resolveSessionDir(process.cwd(), resolveAgentDir());
-  const sessions = await listSessions({ all: global, dir, isCustom });
-  if (sessions.length === 0) {
-    console.log(global ? "No pi-link sessions found." : "No pi-link sessions found in this cwd.");
-    console.log("Start one: pi-link <name>");
+
+  // Phase 3: mode-selecting flags.
+  if (a === "--list") {
+    setMode("list");
+    continue;
+  }
+  if (a.startsWith("--resolve=")) {
+    setMode("resolve");
+    if (state.resolveName !== null) fail(`--resolve specified more than once`);
+    state.resolveName = a.slice("--resolve=".length);
+    continue;
+  }
+  if (a === "--resolve") {
+    setMode("resolve");
+    if (state.resolveName !== null) fail(`--resolve specified more than once`);
+    const next = rawArgs[i + 1];
+    if (next === undefined || next.startsWith("-")) {
+      fail(`--resolve requires a name argument.\n  Usage: pi-link --resolve <name> [--global|-g]`);
+    }
+    state.resolveName = next;
+    i++; // consume the value
+    continue;
+  }
+
+  // Phase 4: deprecated subcommands (only at mode-null position).
+  if (state.mode === null && (a === "list" || a === "resolve")) {
+    state.deprecated = a;
+    if (a === "list") {
+      setMode("list");
+    } else {
+      setMode("resolve");
+      const next = rawArgs[i + 1];
+      if (next !== undefined && !next.startsWith("-")) {
+        state.resolveName = next;
+        i++;
+      }
+      // else: leave null; Phase 5 leniency or post-parse validation handles it.
+    }
+    continue;
+  }
+
+  // Phase 5: mode-specific extra-token rejection.
+  if (state.mode === "help") {
+    fail(`--help does not accept arguments: ${a}`);
+  }
+  if (state.mode === "list") {
+    fail(`--list does not accept argument: ${a}\n  Usage: pi-link --list [--global|-g]`);
+  }
+  if (state.mode === "resolve") {
+    // Deprecated-form leniency: `pi-link resolve --global foo` was order-independent;
+    // if we entered via deprecated path and haven't bound a name yet, take this.
+    if (
+      state.deprecated === "resolve" &&
+      state.resolveName === null &&
+      !a.startsWith("-")
+    ) {
+      state.resolveName = a;
+      continue;
+    }
+    fail(`--resolve accepts exactly one name; got extra: ${a}`);
+  }
+
+  // Phase 6: launcher mode entry. state.mode === null here, no name set yet.
+  // (lastWasFlag is still false here — only Phase 7 sets it, and Phase 7 requires launcher mode.)
+  if (state.mode === null) {
+    rejectManagedFlag(a);
+    if (a.startsWith("-")) {
+      fail(`Unknown argument: ${a}\n  Usage: pi-link <name> [--global|-g] [pi flags...]`);
+    }
+    state.mode = "launcher";
+    state.launcherName = a;
+    continue;
+  }
+
+  // Phase 7: launcher mode, name set. Tokens go to passthrough or get rejected.
+  rejectManagedFlag(a);
+  if (a.startsWith("-")) {
+    state.piPassthrough.push(a);
+    // `--key=value` is self-contained; only `--key` (without `=`) might consume
+    // the next token as its value.
+    lastWasFlag = !a.includes("=");
+    continue;
+  }
+  // Bare positional: allowed only if it follows a flag without `=`.
+  if (lastWasFlag) {
+    state.piPassthrough.push(a);
+    lastWasFlag = false;
+    continue;
+  }
+  fail(`Unexpected argument after session name: ${a}\n  Use -- to pass positional arguments to pi.`);
+}
+
+// ── Post-parse validation ──────────────────────────────────────────────────
+
+if (state.mode === "resolve") {
+  if (state.resolveName === null) {
+    fail(`--resolve requires a name argument.\n  Usage: pi-link --resolve <name> [--global|-g]`);
+  }
+  const normalized = state.resolveName.trim().replace(/\s+/g, " ");
+  if (!normalized) {
+    fail(`--resolve requires a non-empty name argument.\n  Usage: pi-link --resolve <name> [--global|-g]`);
+  }
+  state.resolveName = normalized;
+}
+if (state.mode === "launcher") {
+  const normalized = state.launcherName.trim().replace(/\s+/g, " ");
+  if (!normalized) {
+    fail(`session name cannot be empty.\n  Usage: pi-link <name> [--global|-g] [pi flags...]`);
+  }
+  state.launcherName = normalized;
+}
+
+if (state.deprecated) {
+  printDeprecationWarning(state.deprecated);
+}
+
+// ── Dispatch ───────────────────────────────────────────────────────────────
+
+switch (state.mode) {
+  case null:
+  case "help":
+    printHelp();
     process.exit(0);
+    break; // unreachable; present to satisfy no-fallthrough lints
+  case "list":
+    await runList(state);
+    break;
+  case "resolve":
+    await runResolve(state);
+    break;
+  case "launcher":
+    await runLauncher(state);
+    break;
+  default:
+    fail(`internal error: unknown mode ${state.mode}`);
+}
+
+// ── Mode handlers ──────────────────────────────────────────────────────────
+
+async function runList(state) {
+  const { dir, isCustom } = resolveSessionDir(process.cwd(), resolveAgentDir());
+  const sessions = await listSessions({ all: state.global, dir, isCustom });
+  if (sessions.length === 0) {
+    console.log(state.global ? "No pi-link sessions found." : "No pi-link sessions found in this cwd.");
+    console.log("Start one: pi-link <name>");
+    return;
   }
-  const columns = global
+  const columns = state.global
     ? [
         { header: "NAME", get: (s) => s.name },
         { header: "CWD", get: (s) => displayPath(s.cwd) },
@@ -313,71 +534,33 @@ if (command === "list") {
     console.log("");
     console.log(dim("Resume: pi-link <name>"));
   }
-} else if (command === "resolve") {
-  let global = false;
-  const positional = [];
-  for (const a of args) {
-    rejectRenamedFlag(a);
-    if (a === "--global" || a === "-g") global = true;
-    else if (a.startsWith("-")) {
-      console.error(`Unknown argument: ${a}`);
-      console.error("Usage: pi-link resolve <name> [--global|-g]");
-      process.exit(1);
-    } else positional.push(a);
-  }
-  if (positional.length !== 1) {
-    console.error("Usage: pi-link resolve <name> [--global|-g]");
-    process.exit(1);
-  }
-  const name = positional[0].trim().replace(/\s+/g, " ");
-  if (!name) {
-    console.error("Usage: pi-link resolve <name> [--global|-g]");
-    process.exit(1);
-  }
+}
+
+async function runResolve(state) {
+  const name = state.resolveName; // already normalized
   const { dir, isCustom } = resolveSessionDir(process.cwd(), resolveAgentDir());
   const { local, all } = await findSessionsByName(name, dir, isCustom);
-  const matches = global ? all : local;
+  const matches = state.global ? all : local;
   if (matches.length === 1) {
     process.stdout.write(matches[0].path);
-  } else if (matches.length > 1) {
-    printCandidates(name, matches);
+    return; // exit 0
   }
-} else if (command && command !== "--help" && command !== "-h") {
-  // pi-link [--global|-g] <name> [pi flags...] — resolve and launch Pi.
-  // Walk every token in one pass: pull out --global wherever it appears, treat
-  // the first non-flag token as the name, reject managed flags, forward the rest.
-  let global = false;
-  let name = null;
-  const piPassthrough = [];
-  for (const token of [command, ...args]) {
-    rejectRenamedFlag(token);
-    if (token === "--global" || token === "-g") { global = true; continue; }
-    rejectManagedFlag(token);
-    if (name === null) {
-      // Before the name is set, an unknown leading flag is almost certainly a
-      // user mistake (`pi-link --model gpt-4 foo`) — don't silently treat it
-      // as a session name. After the name is set, anything goes (forwarded to Pi).
-      if (token.startsWith("-")) {
-        console.error(`Unknown argument before name: ${token}`);
-        console.error("Usage: pi-link <name> [--global|-g] [pi flags...]");
-        process.exit(1);
-      }
-      name = token;
-    } else piPassthrough.push(token);
+  if (matches.length > 1) {
+    printCandidates(name, matches); // exits 1
   }
-  if (!name) {
-    console.error("Usage: pi-link <name> [--global|-g] [pi flags...]");
-    process.exit(1);
+  // matches.length === 0 → not found; exit 2 to distinguish from ambiguous.
+  console.error(`No session named "${name}" found${state.global ? "" : " in this cwd"}.`);
+  if (!state.global && all.length > 0) {
+    console.error(`(${all.length} match${all.length === 1 ? "" : "es"} in other cwds — try --global to consider ${all.length === 1 ? "it" : "them"}.)`);
   }
-  name = name.trim().replace(/\s+/g, " ");
-  if (!name) {
-    console.error("Usage: pi-link <name> [--global|-g] [pi flags...]");
-    process.exit(1);
-  }
+  process.exit(2);
+}
 
+async function runLauncher(state) {
+  const name = state.launcherName; // already normalized
   const { dir, isCustom } = resolveSessionDir(process.cwd(), resolveAgentDir());
   const { local, all } = await findSessionsByName(name, dir, isCustom);
-  const matches = global ? all : local;
+  const matches = state.global ? all : local;
   if (matches.length > 1) {
     printCandidates(name, matches);
   }
@@ -387,13 +570,13 @@ if (command === "list") {
     console.error(`Resuming session: ${matches[0].path}`);
     piArgs.push("--session", matches[0].path);
   } else {
-    if (!global && all.length > local.length) {
+    if (!state.global && all.length > local.length) {
       const elsewhere = all.length - local.length;
       console.error(`No "${name}" in this cwd. (${elsewhere} match${elsewhere === 1 ? "" : "es"} in other cwds — use --global to consider ${elsewhere === 1 ? "it" : "them"}.)`);
     }
     console.error("Starting new session.");
   }
-  piArgs.push("--link", ...piPassthrough);
+  piArgs.push("--link", ...state.piPassthrough);
 
   const isWin = process.platform === "win32";
   const cmd = isWin ? "cmd.exe" : "pi";
@@ -413,12 +596,4 @@ if (command === "list") {
     console.error(`Failed to start pi: ${err.message}`);
     process.exit(1);
   });
-} else {
-  console.error("Usage: pi-link <name> [--global|-g] [pi flags...]");
-  console.error("       pi-link list [--global|-g]");
-  console.error("       pi-link resolve <name> [--global|-g]");
-  console.error("");
-  console.error("By default, name lookup is scoped to the current cwd.");
-  console.error("--global / -g widens the search to sessions in any cwd.");
-  process.exit(0);
 }
