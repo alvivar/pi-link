@@ -10,27 +10,21 @@ This changelog is based on the git history from `2026-03-21` (initial commit) th
 
 Stable release for the 0.1.15 cycle, promoted after beta soak.
 
-### Note: shell launcher install changed for Pi 0.75 users
+### Install note for Pi 0.75+
 
-Pi 0.75 (released 2026-05-17) installs Pi packages into a private npm root (`~/.pi/agent/npm/`) instead of the global npm root ([#4587](https://github.com/earendil-works/pi-mono/issues/4587)). This solves a permission-error class. Side effect: **`pi install npm:pi-link` no longer puts the `pi-link` shell command on PATH** — the bin shim ends up at `~/.pi/agent/npm/node_modules/.bin/pi-link`, which isn't a system PATH location.
+Pi 0.75 installs Pi packages under `~/.pi/agent/npm/`, so `pi install npm:pi-link` still enables the in-Pi extension features (`/link*`, tools, `--link`) but no longer puts the `pi-link` shell launcher on PATH.
 
-**The in-Pi features are unaffected.** Every `/link*` slash command, every LLM tool (`link_send`, `link_prompt`, etc.), the `--link` flag, and auto-resume all keep working after `pi install npm:pi-link`. The minimum install is unchanged.
-
-The `pi-link <name>` shell launcher is the only piece that needs an extra step. It's a convenience for starting named sessions from a terminal prompt; equivalent results are reachable from inside Pi via `/link-connect <name>` or by setting `PI_LINK_NAME` before launching `pi --link`.
-
-If you want the shell launcher back, install it separately:
+If you use `pi-link <name>` from your shell, also install the launcher globally:
 
 ```sh
 npm i -g pi-link
 ```
 
-Both installs together are safe. Users who don't use the shell launcher can ignore this section entirely.
+Users who only use pi-link inside Pi do not need this extra step. Background: [pi-mono#4587](https://github.com/earendil-works/pi-mono/issues/4587).
 
 ### Breaking
 
-- **Pi 0.74+ is now required.** Runtime imports use the `@earendil-works/*` namespace introduced in Pi 0.74. Users on Pi ≤0.73 should pin `pi-link@0.1.14`.
-  - `index.ts`: imports `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui`
-  - These imports are resolved at extension load by Pi's loader (`VIRTUAL_MODULES` in compiled binaries, `getAliases()` in Node mode), not via npm. No peer-dep declaration is needed.
+- **Pi 0.74+ is now required.** pi-link now uses the `@earendil-works/*` Pi package namespace. Users on Pi ≤0.73 should pin `pi-link@0.1.14`.
 
 ### Added
 
@@ -44,19 +38,21 @@ Both installs together are safe. Users who don't use the shell launcher can igno
 
 ### Changed
 
-- **Removed `peerDependencies` from `package.json`.** Pi's extension loader resolves `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`, and `typebox` from its own bundled modules regardless of npm state. Declaring them as peers added no enforcement (npm peer-checking across global siblings is unreliable) but generated install-time warnings on `npm i -g pi-link`. `npm i -g pi-link` now installs cleanly with only `ws` as a runtime dependency.
+- **Removed Pi peer dependencies from `package.json`.** Pi provides its own extension APIs at load time; declaring them as npm peers caused unnecessary install warnings and duplicate package installs. `ws` remains the only runtime dependency.
 - **`pi-link --resolve <missing-name>` now exits with code `2`** (was `0`). Single match still exits `0`; ambiguous still exits `1`; not found is now distinguishable from success in scripts. The legacy `pi-link resolve <missing-name>` form gets the same fix.
 - **`pi-link <name> <extra-positional>` now errors** instead of silently passing the extra to Pi as a prompt. Catches typos like `pi-link resolv foo`. Tokens that follow a flag without `=` are still accepted as that flag's value (e.g. `pi-link worker --model opus` works). Use `--` to pass bare positionals through unchanged: `pi-link worker -- some-arg`.
 - **`pi-link foo --help` now errors** with "cannot combine session name and --help" instead of silently passing `--help` to Pi. Run `pi --help` for Pi's own help.
-- **Published tarball trimmed to 7 files** (was 18 files / 87.5 kB on beta.0). Explicit `files` allowlist in `package.json` so internal planning artifacts (`PLAN-*.md`, `PROPOSAL-*.md`, `REPORT-*.md`, `REQUEST-*.md`) and the test harness no longer ship to npm. Users get `bin/`, `skills/`, `index.ts`, `README.md`, `CHANGELOG.md`, `LICENSE`, and `package.json`.
+- **Published tarball trimmed to 7 files.** Explicit `files` allowlist so internal planning artifacts and the test harness no longer ship to npm.
 
 ### Deprecated
 
-- **`pi-link list` and `pi-link resolve` subcommands.** Use `--list` / `--resolve` instead. Subcommands still work for one release with a stderr deprecation warning, then will be removed. The `--global` flag placement is more flexible in the deprecated `resolve` form than the canonical `--resolve` form: `pi-link resolve --global foo` is still accepted, while `pi-link --resolve --global foo` is an error (use `pi-link --resolve foo --global` or `--resolve=foo --global`).
+- **`pi-link list` and `pi-link resolve` subcommands.** Use `--list` / `--resolve` instead. Subcommands still work for one release with a stderr deprecation warning, then will be removed.
 
 ### Migration from 0.1.14
 
-All existing scripts and aliases continue to work — the deprecated subcommands print a stderr warning but produce identical output (and the new exit-code 2 on missing resolve). Scripts that depended on `pi-link resolve <name>` returning exit 0 for missing names need updating to handle 2. Most callers already treated empty stdout as "not found" and will be unaffected.
+Existing launcher aliases keep working for this release, but deprecated `list` / `resolve` subcommands now print a stderr warning.
+
+One behavior change may affect scripts: `pi-link resolve <missing>` now exits `2` instead of `0`, so callers that trusted exit `0` to mean "found" should update their handling.
 
 To silence the deprecation warning, switch to the flag form:
 
@@ -68,19 +64,15 @@ To silence the deprecation warning, switch to the flag form:
 | `pi-link resolve foo -g`       | `pi-link --resolve foo -g`                                         |
 | `pi-link resolve --global foo` | `pi-link --resolve foo --global` (order matters in canonical form) |
 
-### Test coverage
-
-40 automated cases in `test/cli-flags-test.mjs` covering: canonical forms (5), deprecation aliases (4), orphan-positional rejection (7), mode-selecting validation (11), help / unknown / managed-flag rejection (8), wrapper-vs-pi flag boundaries (4). Cases that exercise the launch path use a stubbed `pi` on PATH that records argv + `PI_LINK_NAME`. Run with `node test/cli-flags-test.mjs`.
-
 ---
 
 ## 0.1.15-beta.0 — 2026-05-17 _(pulled — do not install)_
 
-Initial 0.1.15 beta. Replaced within hours by `0.1.15-beta.1`.
+Initial 0.1.15 beta, superseded by `0.1.15`.
 
-**Issue:** peer dependencies still pointed at the old `@mariozechner/*` namespace, which Pi 0.74 no longer publishes. `npm install` on a Pi-0.74+ machine auto-pulled the tombstoned `@mariozechner/*@0.73.1` packages (203 transitive deps) and printed four npm deprecation warnings (`pi-agent-core`, `pi-tui`, `pi-ai`, `pi-coding-agent`).
+**Issue:** peer dependencies still pointed at the old `@mariozechner/*` namespace, causing npm to install deprecated Pi 0.73 packages on Pi 0.74+ systems.
 
-**Resolution:** fixed during the 0.1.15 beta cycle. The stable 0.1.15 release uses the `@earendil-works/*` imports at runtime and removes npm peer dependencies entirely, relying on Pi's extension loader for Pi-bundled modules.
+**Resolution:** stable `0.1.15` uses the `@earendil-works/*` runtime imports and removes Pi npm peer dependencies.
 
 ---
 

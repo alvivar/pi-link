@@ -67,7 +67,7 @@ Or install both in one line:
 pi install npm:pi-link && npm i -g pi-link
 ```
 
-The shell launcher is convenience-only — you can always reach the same functionality from inside Pi via `/link-connect <name>` or by setting `PI_LINK_NAME` before launching `pi --link`.
+The shell launcher is convenience-only — you can always reach the same functionality from inside Pi via `/link-connect <name>` and `/link-name <name>`.
 
 > **Why two installs?** Pi 0.75 installs Pi packages into a private npm root (`~/.pi/agent/npm/`) for safer permission handling ([pi-mono#4587](https://github.com/earendil-works/pi-mono/issues/4587)). That's where the Pi extension lives, but it means the `pi-link` shell command is no longer on system PATH. `npm i -g pi-link` puts it on PATH separately. Both installs are safe to use together.
 
