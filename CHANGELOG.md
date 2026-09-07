@@ -6,6 +6,20 @@ This changelog is based on the git history from `2026-03-21` (initial commit) th
 
 ---
 
+## 0.4.1 — 2026-09-06
+
+### Added
+
+- **Received link messages now sit in Pi's own message panel.** A delivery is drawn in the same background panel Pi gives extension messages, indented by your configured output padding, so link traffic lines up with the rest of the transcript instead of standing outside it.
+
+- **A long delivery is collapsed to a preview.** It shows the first six content rows as they wrap at the available content width inside the panel, then `... (N more lines, ctrl+o to expand)`; a message that already fits shows whole, with no hint. The six counts content rows only — the panel's padding and the hint itself sit outside it, so the panel has no fixed height. Expanding is Pi's existing global toggle, `Ctrl+O` unless you have rebound `app.tools.expand`, and the hint always names your actual binding. It expands every custom message at once, including ones restored from an earlier session; pi-link adds no toggle of its own. Only the display changes — the full text is still what reaches the model, what was delivered, and what the session file keeps.
+
+### Changed
+
+- **Outgoing `link_send` and `link_compact` calls now follow Pi's global expansion toggle.** Collapsed, the message — or the compaction instructions — has runs of whitespace collapsed to single spaces and keeps the first 60 characters of that result; on a narrow terminal that preview may still wrap onto more than one row. Expanded, the original text appears as it was written, whitespace and all. Indentation of the surrounding call is unchanged, and the tool's own result line still reports send or compaction status — never the other terminal's reply.
+
+---
+
 ## 0.4.0 — 2026-09-04
 
 ### Added

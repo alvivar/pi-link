@@ -717,3 +717,9 @@ Because a gated flush does not reschedule, the release path is load-bearing. `re
 ### Rendering
 
 Delivered link batches render with a styled `⚡ [link]` prefix using the theme's accent color; sender attribution lives in the `From "name":` blocks inside the message body, not in the prefix. The link status text in Pi's footer uses `theme.fg("dim", ...)` to match Pi's standard footer styling.
+
+Deliveries sit in the same background panel Pi draws around extension messages by default, indented by your configured output padding, so link messages line up with the rest of the transcript instead of standing outside it.
+
+A long delivery is previewed rather than printed whole. Collapsed, it shows the first six rows as they wrap at the current window width, followed by `... (N more lines, ctrl+o to expand)`; a message that already fits in six rows shows in full with no hint. Expanding is Pi's own global toggle — `Ctrl+O` unless you have rebound `app.tools.expand`, and the hint always names your actual binding — so it expands every custom message at once, including messages restored from an earlier session. Only the display changes: the full text is what reaches the model, what `link_send` delivered, and what the session file keeps.
+
+The same toggle also expands outgoing calls: `link_send` and `link_compact` collapse the message or instructions into a one-line preview — runs of whitespace become single spaces — and keep its first 60 characters, which a narrow terminal may still wrap onto more than one row. Expanding reveals the original text as it was written. Expanding a call says nothing about delivery — the tool's own result line reports that.

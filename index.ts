@@ -12,10 +12,11 @@
 
 import {
   VERSION as PI_VERSION,
+  keyHint,
   type ExtensionAPI,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { Box, Text, type Component } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import * as crypto from "node:crypto";
 import { createServer, type Server as HttpServer } from "node:http";
@@ -40,6 +41,8 @@ const CONNECT_HANDSHAKE_TIMEOUT_MS = 5_000;
 const FLUSH_DELAY_MS = 200;
 const BATCH_MAX_ITEMS = 20;
 const BATCH_MAX_CHARS = 16_000;
+// Visual rows of an incoming message kept while Pi's global expansion is off.
+const PREVIEW_ROWS = 6;
 
 // ─── Protocol ────────────────────────────────────────────────────────────────
 
@@ -149,6 +152,41 @@ function piVersionSupported(version: string): boolean {
     if (part !== MIN_PI_VERSION[i]) return part > MIN_PI_VERSION[i];
   }
   return prerelease === undefined; // exactly the floor: only the release qualifies
+}
+
+/**
+ * The first PREVIEW_ROWS rows of `content`, plus a hint when rows were dropped.
+ *
+ * The rows come from rendering `content` at the real width, not from splitting the
+ * raw string on newlines: one long logical line wraps into many visual rows, and
+ * the same message yields different rows in a narrow window. Rendering is Text's
+ * job here, cached by (text, width), so the preview stays a slice of the identical
+ * output the expanded view shows.
+ */
+function messagePreview(
+  content: Text,
+  dim: (text: string) => string,
+): Component {
+  const hint = new Text("", 0, 0);
+  return {
+    render(width: number): string[] {
+      const rows = content.render(width);
+      if (rows.length <= PREVIEW_ROWS) return rows;
+      // Rebuilt every render so a rebound key is never shown stale; it is one short
+      // line, and Text still caches the content rows, which are the expensive part.
+      hint.setText(
+        dim(`... (${rows.length - PREVIEW_ROWS} more lines, `) +
+          keyHint("app.tools.expand", "to expand") +
+          dim(")"),
+      );
+      // The budget covers content only, so the hint may wrap rather than be cut off.
+      return [...rows.slice(0, PREVIEW_ROWS), ...hint.render(width)];
+    },
+    invalidate(): void {
+      content.invalidate();
+      hint.invalidate();
+    },
+  };
 }
 
 // ─── Extension ───────────────────────────────────────────────────────────────
@@ -1490,8 +1528,19 @@ export default function (pi: ExtensionAPI) {
     return textResult("Not connected to link", { error: "not_connected" });
   }
 
-  function truncatePreview(text: string) {
-    return text.length > 60 ? text.slice(0, 60) + "..." : text;
+  // Collapsed one-line preview for the two outgoing tools. Whitespace is normalized so a
+  // multiline message stays on the tool's single preview line, then clipped to 60
+  // characters. The hint appears only when characters are actually hidden: expanding shows
+  // the original text, so collapsing whitespace alone is not something to advertise.
+  // Styling is applied per segment, like messagePreview above: keyHint ends with a
+  // foreground reset, so punctuation appended after it would render undimmed.
+  function truncatePreview(text: string, dim: (text: string) => string) {
+    const preview = text.replace(/\s+/g, " ");
+    return preview.length > 60
+      ? dim(preview.slice(0, 60) + "... (") +
+          keyHint("app.tools.expand", "to expand") +
+          dim(")")
+      : dim(preview);
   }
 
   // Shared "target not found" result for the send/compact tools.
@@ -1566,16 +1615,19 @@ export default function (pi: ExtensionAPI) {
       return textResult(`${verb} ${target}`, { to: params.to });
     },
 
-    renderCall(args, theme) {
+    renderCall(args, theme, context) {
+      const dim = (text: string) => theme.fg("dim", text);
       const preview =
         typeof args.message === "string"
-          ? truncatePreview(args.message)
-          : "...";
+          ? context.expanded
+            ? dim(args.message)
+            : truncatePreview(args.message, dim)
+          : dim("...");
       const text =
         theme.fg("toolTitle", theme.bold("link_send ")) +
         theme.fg("accent", args.to) +
         "\n  " +
-        theme.fg("dim", preview);
+        preview;
       return new Text(text, 0, 0);
     },
 
@@ -1679,11 +1731,16 @@ export default function (pi: ExtensionAPI) {
       });
     },
 
-    renderCall(args, theme) {
+    renderCall(args, theme, context) {
       let text = theme.fg("toolTitle", theme.bold("link_compact "));
       text += theme.fg("accent", String(args.to));
+      const dim = (t: string) => theme.fg("dim", t);
       if (typeof args.instructions === "string")
-        text += "\n  " + theme.fg("dim", truncatePreview(args.instructions));
+        text +=
+          "\n  " +
+          (context.expanded
+            ? dim(args.instructions)
+            : truncatePreview(args.instructions, dim));
       return new Text(text, 0, 0);
     },
 
@@ -1915,12 +1972,22 @@ export default function (pi: ExtensionAPI) {
 
   // ── Message renderer ─────────────────────────────────────────────────────
 
-  pi.registerMessageRenderer("link", (message, _options, theme) => {
+  pi.registerMessageRenderer("link", (message, options, theme) => {
     const from =
       (message.details as Record<string, unknown> | undefined)?.from ?? "link";
     const text =
       theme.fg("accent", `⚡ [${from}] `) +
       theme.fg("text", String(message.content));
-    return new Text(text, 0, 0);
+    const content = new Text(text, 0, 0);
+    // The same panel Pi draws around extension messages by default: returning our own
+    // component bypasses the host's box, so a link message would otherwise sit unframed
+    // among framed ones. `outputPad` is the user's configured output padding.
+    const box = new Box(options.outputPad, 1, (t) => theme.bg("customMessageBg", t));
+    box.addChild(
+      options.expanded
+        ? content
+        : messagePreview(content, (s) => theme.fg("muted", s)),
+    );
+    return box;
   });
 }
