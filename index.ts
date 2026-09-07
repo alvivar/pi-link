@@ -13,6 +13,7 @@
 import {
   VERSION as PI_VERSION,
   keyHint,
+  keyText,
   type ExtensionAPI,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
@@ -154,6 +155,14 @@ function piVersionSupported(version: string): boolean {
   return prerelease === undefined; // exactly the floor: only the release qualifies
 }
 
+// keyText is empty when app.tools.expand has no binding, and the native hint would then
+// read " to expand" with no key in it, naming nothing the reader can press.
+function expansionHint(dim: (text: string) => string): string {
+  return keyText("app.tools.expand")
+    ? keyHint("app.tools.expand", "to expand")
+    : dim("bind app.tools.expand to expand");
+}
+
 /**
  * The first PREVIEW_ROWS rows of `content`, plus a hint when rows were dropped.
  *
@@ -176,7 +185,7 @@ function messagePreview(
       // line, and Text still caches the content rows, which are the expensive part.
       hint.setText(
         dim(`... (${rows.length - PREVIEW_ROWS} more lines, `) +
-          keyHint("app.tools.expand", "to expand") +
+          expansionHint(dim) +
           dim(")"),
       );
       // The budget covers content only, so the hint may wrap rather than be cut off.
@@ -1532,13 +1541,13 @@ export default function (pi: ExtensionAPI) {
   // multiline message stays on the tool's single preview line, then clipped to 60
   // characters. The hint appears only when characters are actually hidden: expanding shows
   // the original text, so collapsing whitespace alone is not something to advertise.
-  // Styling is applied per segment, like messagePreview above: keyHint ends with a
+  // Styling is applied per segment, like messagePreview above: the hint ends with a
   // foreground reset, so punctuation appended after it would render undimmed.
   function truncatePreview(text: string, dim: (text: string) => string) {
     const preview = text.replace(/\s+/g, " ");
     return preview.length > 60
       ? dim(preview.slice(0, 60) + "... (") +
-          keyHint("app.tools.expand", "to expand") +
+          expansionHint(dim) +
           dim(")")
       : dim(preview);
   }
