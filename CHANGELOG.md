@@ -6,7 +6,7 @@ This changelog is based on the git history from `2026-03-21` (initial commit) th
 
 ---
 
-## 0.4.1 — 2026-09-06
+## 0.4.1 — 2026-09-07
 
 ### Added
 
@@ -16,7 +16,7 @@ This changelog is based on the git history from `2026-03-21` (initial commit) th
 
 ### Changed
 
-- **Outgoing `link_send` and `link_compact` calls now follow Pi's global expansion toggle.** Collapsed, the message — or the compaction instructions — has runs of whitespace collapsed to single spaces and keeps the first 60 characters of that result; on a narrow terminal that preview may still wrap onto more than one row. Expanded, the original text appears as it was written, whitespace and all. Indentation of the surrounding call is unchanged, and the tool's own result line still reports send or compaction status — never the other terminal's reply.
+- **Outgoing `link_send` and `link_compact` calls now follow Pi's global expansion toggle.** Collapsed, the message — or the compaction instructions — has runs of whitespace collapsed to single spaces and keeps the first 60 characters of that result; on a narrow terminal that preview may still wrap onto more than one row. Expanded, the uncollapsed text is shown with its line breaks and spacing as rendered by Pi. Indentation of the surrounding call is unchanged, and the tool's own result line still reports send or compaction status — never the other terminal's reply.
 
 ---
 
