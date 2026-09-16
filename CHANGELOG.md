@@ -6,6 +6,36 @@ This changelog is based on the git history from `2026-03-21` (initial commit) th
 
 ---
 
+## 0.5.0 — 2026-09-16
+
+### Added
+
+- **A terminal named `local@group` sees and reaches only its own group.** The group is the text after the **first** `@` — `archon@pi-link` is in `pi-link`, `a@g@h` is in `g@h` — and every name without an `@`, or ending in one like `a@`, belongs to the single implicit group of plain names, which behaves exactly as before among themselves. `link_list` lists only that group and reports status, cwd and context for nobody else, `/link` and the footer count the same way, join and leave toasts stay silent for strangers, and `link_send`/`link_compact` to a name outside the group fail with the same `not found` result a typo gets, suggesting only your own group. The hub enforces the boundary while routing too, for chat, compaction requests and compaction responses alike: from the sender's side a terminal of another group simply does not exist. Nothing new is stored or sent — the rule is read from names at the moment it is used, so renaming a terminal with `/link-name` moves it between groups as soon as the new name takes effect — at once on the hub, and on the next welcome for a client, whose rename reconnects first. No group is reserved or privileged.
+
+### Changed
+
+- **Both compaction budgets are now five minutes, up from three.** `COMPACT_TIMEOUT_MS` is 300 000 ms, and its two users move together: `link_compact` waits that long for the target's result, and a manual compaction's delivery gate falls back to that deadline when no ending is observable. The timeout still bounds the caller's wait only — nothing aborts the target, and a timed-out call may mean the compaction is still running. The cost of the longer fallback is explicit: a cancelled manual compaction whose lifecycle ending pi-link does not handle may now hold a terminal's messages for up to two minutes longer unless the terminal's next agent run or a later successful compaction releases the gate first. Five minutes is a ceiling, not a promise that every large compaction fits inside it.
+
+- **A colliding name is deduped on its local part, so it can no longer change group.** The hub used to hand a second `archon@pi-link` the name `archon@pi-link-2`, which belongs to the invented group `pi-link-2`; it now assigns `archon-2@pi-link`. Plain names are unaffected (`builder` still becomes `builder-2`), and the boundary is the same first `@` the grouping rule uses, so `a@` becomes `a-2@` and `@g` becomes `-2@g`.
+
+- **`pi-link --status` validates the fields it prints, not the hub's whole payload.** It still refuses a body it cannot print with the unsupported message instead of a stack trace, checking that `terminals` is an array of objects with a string `name`, an optional string `cwd`, a `context` that is `null` or `{ tokens, window }`, and `status`/`sinceSeconds` present together or not at all. The checks that drew no cell — `hub` and `port` types, a non-empty list, `role` per position, `terminals[0].name === hub` — are gone, so a zero exit no longer certifies them — nor that a hub, rather than any service returning the same printable shape, answered. The hub's payload is unchanged: it still reports itself first, then clients sorted by name, with the same fields.
+
+- **Pi is accepted only as a stable `x.y.z` release.** The version check compared full SemVer, including prerelease precedence and build metadata; it now matches three numbers and compares them against the 0.84.2 floor, so a version carrying any suffix is refused instead of interpreted. The registry lists no prerelease of Pi, and a refusal explains itself: `pi-link requires Pi >=0.84.2 in x.y.z format, without suffixes (detected …); pi-link 0.2.x supports Pi 0.74–0.84.1.` The refusal still happens before pi-link registers anything.
+
+- **The bundled skill is now `pi-link-tools`, invoked as `/skill:pi-link-tools`.** It is the same skill under a new name and path (`skills/pi-link-tools/`), renamed from `pi-link-coordination`; no alias or duplicate of the old name is kept, so discovery finds the new one only. Its guidance is unchanged. Related wording moved with it: `link_compact` no longer promises that a completed compaction means you can immediately send new work, its decline rule now reads "no compaction holds its gate" to match the gate it has always checked, and self-targeting answers `Cannot compact yourself.` instead of pointing at the human's `/compact` command. The rejection itself, its `self_target` error and every other compaction outcome are unchanged.
+
+- **Internal cleanup: one set of roster maps instead of two, and checks that defended against nothing removed.** The hub and the client kept separate status/cwd/context maps for the same peers, with the hub's `register` handler filtering the newcomer out of its own welcome and deleting entries by hand on close. There is now one set: the getters read it directly, and the hub learns and forgets a peer through its own delivery of the `terminal_joined`/`terminal_left` frames it already broadcasts. A terminal that loses its hub now also drops that network's snapshots, so the maps cannot describe a peer from a connection that ended — previously the inactive set was simply never read.
+
+- **Internal cleanup: checks that defended against nothing were removed.** The context snapshot no longer tests whether Pi provides `getContextUsage` — every supported Pi version does, and older ones are refused at load — and its formatter no longer re-checks a context window its only producer already validated. `agent_start` no longer clears the active-tool set, because `agent_end` always precedes it and already does; that clear stays where it has a cause. The two loops that fail pending compactions now use the entry they are already iterating instead of looking it up a second time. No behavior changes.
+
+### Compatibility
+
+- **Isolation holds only when every terminal runs the same version; upgrade and restart together.** There is no compatibility code. Against an old hub a new client filters its own view and its own sends, but the hub does not refuse cross-group traffic, so a terminal of another group can still deliver a message or start a compaction on it. Against a new hub an old client still sees everyone and its cross-group send is refused by the hub, arriving as the already-documented invisible routing failure.
+
+- **Groups isolate attention, not access.** There is no authentication, any process may register under any name and therefore any group, `pi-link --status` still reports every terminal on the machine on purpose, and other groups' status, cwd and context updates still transit the shared wire and are stored locally — they are simply never shown. Nothing is revoked retroactively either: a message already queued before a rename is still delivered, and a compaction already admitted still runs.
+
+---
+
 ## 0.4.1 — 2026-09-07
 
 ### Added

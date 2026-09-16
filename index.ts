@@ -34,7 +34,7 @@ import { WebSocket, WebSocketServer } from "ws";
 const MIN_PI_VERSION = [0, 84, 2];
 
 const DEFAULT_PORT = 9900;
-const COMPACT_TIMEOUT_MS = 180_000;
+const COMPACT_TIMEOUT_MS = 300_000;
 const RECONNECT_DELAY_MS = 2000;
 // Bounds the HTTP Upgrade only. Without it `ws` waits forever, so a listener that
 // accepts the socket and never answers leaves the terminal offline with no retry.
@@ -83,8 +83,8 @@ interface StatusUpdateMsg {
   type: "status_update";
   name: string;
   status: LinkStatus;
-  // Per-terminal LLM context. Absent = old terminal (ignore); null = clear
-  // stored value; object = store. Only status_update carries the null-clear.
+  // Per-terminal LLM context. Absent = keep the stored value; null = clear it;
+  // object = store it. Only status_update carries the null-clear.
   context?: ContextSnapshot | null;
 }
 interface ErrorMsg {
@@ -127,32 +127,18 @@ type LinkMessage =
   | CompactResponseMsg;
 
 /**
- * True when Pi is at or above MIN_PI_VERSION. A fixed floor needs an ordered compare
- * of three numbers, not a semver dependency — but it does need SemVer's shape, so the
- * core rejects leading zeros, an optional prerelease is captured because it lowers
- * precedence, and optional build metadata is matched and then ignored because it
- * carries none. A prerelease of the floor itself precedes it, so `0.84.2-beta.1` is
- * below `0.84.2` while `0.85.0-beta.1` is above it on its core alone. Each suffix is
- * a dot-separated series of nonempty identifiers, so `0.84.2+.` and `0.85.0-alpha..1`
- * are malformed. Anything unparsable, or with a component too large to compare
- * exactly, is refused rather than guessed at.
+ * True when Pi is at or above MIN_PI_VERSION. Stable releases only: a version
+ * carrying a prerelease or build suffix is refused, not guessed at, which leaves an
+ * ordered compare of three numbers as the whole rule.
  */
 function piVersionSupported(version: string): boolean {
-  const parsed =
-    /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(
-      version.trim(),
-    );
+  const parsed = /^(\d+)\.(\d+)\.(\d+)$/.exec(version.trim());
   if (!parsed) return false;
-  // A numeric prerelease identifier may not carry a leading zero. `0rc` may, being
-  // alphanumeric, and so may a build identifier, which never affects precedence.
-  const prerelease = parsed[4];
-  if (prerelease?.split(".").some((id) => /^0\d+$/.test(id))) return false;
   for (let i = 0; i < 3; i++) {
     const part = Number(parsed[i + 1]);
-    if (!Number.isSafeInteger(part)) return false;
     if (part !== MIN_PI_VERSION[i]) return part > MIN_PI_VERSION[i];
   }
-  return prerelease === undefined; // exactly the floor: only the release qualifies
+  return true; // exactly the floor
 }
 
 // keyText is empty when app.tools.expand has no binding, and the native hint would then
@@ -206,8 +192,8 @@ export default function (pi: ExtensionAPI) {
   // extension load error naming this message, and keeps running without pi-link.
   if (!piVersionSupported(PI_VERSION)) {
     throw new Error(
-      `pi-link requires Pi >=${MIN_PI_VERSION.join(".")} (detected ${PI_VERSION || "unknown"}); ` +
-        `upgrade Pi, or pin pi-link 0.2.x for Pi 0.74–0.84.1.`,
+      `pi-link requires Pi >=${MIN_PI_VERSION.join(".")} in x.y.z format, without suffixes ` +
+        `(detected ${PI_VERSION || "unknown"}); pi-link 0.2.x supports Pi 0.74–0.84.1.`,
     );
   }
 
@@ -261,9 +247,6 @@ export default function (pi: ExtensionAPI) {
   // never closes a server it was handed. Nulled wherever `wss` is.
   let hubHttpServer: HttpServer | null = null;
   const hubClients = new Map<WebSocket, string>(); // ws → terminal name
-  const hubTerminalStatuses = new Map<string, LinkStatus>(); // hub-authoritative
-  const hubTerminalContexts = new Map<string, ContextSnapshot>(); // hub-authoritative
-  const hubTerminalCwds = new Map<string, string>(); // hub-authoritative (excludes self)
 
   // Client state
   let ws: WebSocket | null = null;
@@ -321,7 +304,7 @@ export default function (pi: ExtensionAPI) {
     const ui = getUi();
     if (!ui) return;
     const theme = ui.theme;
-    const count = connectedTerminals.length;
+    const count = visibleTerminals().length;
     const info =
       role === "disconnected"
         ? "link: offline"
@@ -371,7 +354,6 @@ export default function (pi: ExtensionAPI) {
 
   function captureContext(): ContextSnapshot | undefined {
     if (!ctx) return undefined;
-    if (typeof ctx.getContextUsage !== "function") return undefined; // older Pi
     const usage = ctx.getContextUsage();
     if (!usage) return undefined;
     if (usage.contextWindow <= 0) return undefined; // no real context to report
@@ -403,6 +385,12 @@ export default function (pi: ExtensionAPI) {
   function normalizeName(name: string | undefined | null): string | undefined {
     const n = name?.trim().replace(/\s+/g, " ");
     return n ? n : undefined;
+  }
+
+  // Group by name convention: everything after the first `@`; plain names are group "".
+  function groupOf(name: string): string {
+    const at = name.indexOf("@");
+    return at === -1 ? "" : name.slice(at + 1);
   }
 
   // Latest custom session entry of a given type (last-write-wins), or undefined.
@@ -442,7 +430,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   function formatContext(c: ContextSnapshot | null | undefined): string {
-    if (!c || c.contextWindow <= 0) return ""; // guard against bad wire data
+    if (!c) return "";
     const window = formatTokens(c.contextWindow);
     if (c.tokens === null) return `?/${window}`;
     const percent = Math.round((c.tokens / c.contextWindow) * 100);
@@ -451,19 +439,16 @@ export default function (pi: ExtensionAPI) {
 
   function getStatusFor(name: string): LinkStatus | null {
     if (name === terminalName) return deriveStatus();
-    const map = role === "hub" ? hubTerminalStatuses : terminalStatuses;
-    return map.get(name) ?? null;
+    return terminalStatuses.get(name) ?? null;
   }
 
   function getCwdFor(name: string): string | null {
     if (name === terminalName) return currentCwd || null;
-    if (role === "hub") return hubTerminalCwds.get(name) ?? null;
     return terminalCwds.get(name) ?? null;
   }
 
   function getContextFor(name: string): ContextSnapshot | null {
     if (name === terminalName) return captureContext() ?? null;
-    if (role === "hub") return hubTerminalContexts.get(name) ?? null;
     return terminalContexts.get(name) ?? null;
   }
 
@@ -503,8 +488,8 @@ export default function (pi: ExtensionAPI) {
     if (!ctx) return;
 
     // Compacting: hold everything and return WITHOUT rescheduling. setCompacting()
-    // drains on release, so polling a compaction that may run to the 180s ceiling
-    // would be ~900 wakeups for no information.
+    // drains on release, so polling a compaction that may run to the 300s ceiling
+    // would be ~1500 wakeups for no information.
     if (compactionGated()) return;
 
     // Select batch: up to BATCH_MAX_ITEMS, ~BATCH_MAX_CHARS total (soft cap —
@@ -592,15 +577,15 @@ export default function (pi: ExtensionAPI) {
   /**
    * Gate and release inbox delivery around a local manual compaction.
    *
-   * The deadline is the only backstop. A failed manual compaction emits
-   * `compaction_end` to session listeners only, never to extensions, and Pi
-   * clears its compaction controller without aborting it — so success is the sole
-   * positive ending an extension can observe. The timer handle must be explicit
+   * The deadline is the only backstop pi-link uses. Pi 0.84.3+ reports failure and
+   * abort through `session_compact_failed`, which pi-link does not handle (see
+   * REPORT-session-compact-failed.md); `session_compact` is the only
+   * compaction-ending event it handles. The timer handle must be explicit
    * and cleared on every transition: a bare setTimeout outlives its own
    * compaction and would release a *later* compaction's flag.
    *
-   * COMPACT_TIMEOUT_MS is reused only to avoid a new constant. It shares a value
-   * with the remote-request wait by coincidence, not by meaning.
+   * COMPACT_TIMEOUT_MS also bounds the remote-request wait. The two share a
+   * value, not a meaning: nothing here depends on their being equal.
    */
   function setCompacting(on: boolean) {
     localCompacting = on;
@@ -643,9 +628,14 @@ export default function (pi: ExtensionAPI) {
   function uniqueName(requested: string): string {
     const existing = allTerminalNames();
     if (!existing.has(requested)) return requested;
+    // Suffix the local part so a collision never changes the group (same boundary as groupOf).
+    const at = requested.indexOf("@");
+    const cut = at === -1 ? requested.length : at;
+    const local = requested.slice(0, cut);
+    const tail = requested.slice(cut);
     let i = 2;
-    while (existing.has(`${requested}-${i}`)) i++;
-    return `${requested}-${i}`;
+    while (existing.has(`${local}-${i}${tail}`)) i++;
+    return `${local}-${i}${tail}`;
   }
 
   function terminalList(): string[] {
@@ -714,7 +704,6 @@ export default function (pi: ExtensionAPI) {
     for (const [clientWs, name] of hubClients) {
       if (name !== excludeName) clientWs.send(json);
     }
-    // Also deliver to the hub itself (unless excluded)
     if (excludeName !== terminalName) handleIncoming(msg);
   }
 
@@ -736,11 +725,14 @@ export default function (pi: ExtensionAPI) {
     msg: ChatMsg | CompactRequestMsg | CompactResponseMsg,
   ): boolean {
     if (role === "hub") {
-      if (msg.to === terminalName) {
+      // Isolation is a property of the link: a target in another group does not
+      // exist from the sender's domain, for every type routeMessage carries.
+      const crossGroup = groupOf(msg.from) !== groupOf(msg.to);
+      if (!crossGroup && msg.to === terminalName) {
         handleIncoming(msg);
         return true;
       }
-      const targetWs = hubClientByName(msg.to);
+      const targetWs = crossGroup ? undefined : hubClientByName(msg.to);
       if (targetWs) {
         targetWs.send(JSON.stringify(msg));
         return true;
@@ -805,7 +797,7 @@ export default function (pi: ExtensionAPI) {
         }
         updateStatus();
         notify(
-          `Joined link as "${terminalName}" (${connectedTerminals.length} online)`,
+          `Joined link as "${terminalName}" (${visibleTerminals().length} online)`,
           "info",
         );
         pushStatus(true);
@@ -814,36 +806,33 @@ export default function (pi: ExtensionAPI) {
       // ── Membership updates ──
       case "terminal_joined":
         connectedTerminals = msg.terminals;
-        if (role !== "hub" && msg.cwd) terminalCwds.set(msg.name, msg.cwd);
-        if (role !== "hub" && msg.context)
-          terminalContexts.set(msg.name, msg.context);
+        if (msg.cwd) terminalCwds.set(msg.name, msg.cwd);
+        if (msg.context) terminalContexts.set(msg.name, msg.context);
         updateStatus();
-        notify(`"${msg.name}" joined the link`, "info");
+        if (groupOf(msg.name) === groupOf(terminalName))
+          notify(`"${msg.name}" joined the link`, "info");
         break;
 
       case "terminal_left":
         connectedTerminals = msg.terminals;
         terminalStatuses.delete(msg.name);
-        if (role !== "hub") {
-          terminalCwds.delete(msg.name);
-          terminalContexts.delete(msg.name);
-        }
+        terminalCwds.delete(msg.name);
+        terminalContexts.delete(msg.name);
         // Fail any pending compact request to the departed terminal
         for (const [id, pending] of pendingCompactResponses) {
           if (pending.targetName === msg.name) {
-            const p = cleanupPendingCompact(id);
-            if (p) {
-              p.resolve(
-                textResult(`Terminal "${msg.name}" disconnected`, {
-                  to: msg.name,
-                  error: "disconnected",
-                }),
-              );
-            }
+            cleanupPendingCompact(id);
+            pending.resolve(
+              textResult(`Terminal "${msg.name}" disconnected`, {
+                to: msg.name,
+                error: "disconnected",
+              }),
+            );
           }
         }
         updateStatus();
-        notify(`"${msg.name}" left the link`, "info");
+        if (groupOf(msg.name) === groupOf(terminalName))
+          notify(`"${msg.name}" left the link`, "info");
         break;
 
       // ── Status update from another terminal ──
@@ -905,9 +894,9 @@ export default function (pi: ExtensionAPI) {
         syncCompactionStatus();
         notify(`"${from}" requested compact`, "info");
         // compact() aborts the current turn first, so the idle guard above
-        // keeps us from interrupting active work. The runtime guarantees
-        // exactly one of onComplete/onError fires, so compactRunning can't
-        // get stuck and the sender won't hang.
+        // keeps us from interrupting active work. Pi reports the compaction's
+        // outcome through these callbacks once compact() settles; finish() clears
+        // compactRunning and answers the request.
         try {
           ctx.compact({
             customInstructions: msg.instructions,
@@ -926,7 +915,7 @@ export default function (pi: ExtensionAPI) {
         const pending = cleanupPendingCompact(msg.id);
         if (pending) {
           // Use the requested target, not msg.from: a hub-synthesized
-          // not_found response comes from the hub, not the worker.
+          // not_found response comes from the hub, not the target.
           const target = pending.targetName;
           if (msg.ok) {
             pending.resolve(
@@ -965,30 +954,23 @@ export default function (pi: ExtensionAPI) {
       if (msg.type === "register") {
         if (clientName) return; // already registered — ignore duplicate
         clientName = uniqueName(msg.name);
+        // The socket must be in hubClients before terminalList(), or the newcomer
+        // is missing from its own roster. Its metadata is deliberately not stored
+        // yet: the maps below must not echo the newcomer's own snapshot back to it.
         hubClients.set(clientWs, clientName);
-        if (msg.cwd) hubTerminalCwds.set(clientName, msg.cwd);
-        if (msg.context) hubTerminalContexts.set(clientName, msg.context);
         const list = terminalList();
-        connectedTerminals = list;
-        updateStatus();
 
-        // Confirm to the new client (include status + cwd snapshots)
+        // Confirm to the new client (with status, cwd and context snapshots)
         const statuses: Record<string, LinkStatus> = {};
         statuses[terminalName] = deriveStatus(); // hub's own status
-        for (const [name, status] of hubTerminalStatuses) {
-          if (name !== clientName) statuses[name] = status;
-        }
+        for (const [name, status] of terminalStatuses) statuses[name] = status;
         const cwds: Record<string, string> = {};
         if (currentCwd) cwds[terminalName] = currentCwd; // hub's own cwd
-        for (const [name, cwd] of hubTerminalCwds) {
-          if (name !== clientName) cwds[name] = cwd;
-        }
+        for (const [name, cwd] of terminalCwds) cwds[name] = cwd;
         const contexts: Record<string, ContextSnapshot> = {};
         const hubContext = captureContext();
         if (hubContext) contexts[terminalName] = hubContext; // hub's own context
-        for (const [name, c] of hubTerminalContexts) {
-          if (name !== clientName) contexts[name] = c;
-        }
+        for (const [name, c] of terminalContexts) contexts[name] = c;
         clientWs.send(
           JSON.stringify({
             type: "welcome",
@@ -1000,7 +982,8 @@ export default function (pi: ExtensionAPI) {
           } satisfies WelcomeMsg),
         );
 
-        // Notify everyone else (include joiner's cwd + context)
+        // Notify everyone else (include joiner's cwd + context). The hub's own
+        // self-delivery is what records the newcomer's metadata and roster.
         const joined: TerminalJoinedMsg = {
           type: "terminal_joined",
           name: clientName,
@@ -1017,9 +1000,9 @@ export default function (pi: ExtensionAPI) {
 
       // Status update — store and fan out to other clients only (not back to hub)
       if (msg.type === "status_update") {
-        hubTerminalStatuses.set(clientName, msg.status);
-        if (msg.context) hubTerminalContexts.set(clientName, msg.context);
-        else if (msg.context === null) hubTerminalContexts.delete(clientName);
+        terminalStatuses.set(clientName, msg.status);
+        if (msg.context) terminalContexts.set(clientName, msg.context);
+        else if (msg.context === null) terminalContexts.delete(clientName);
         const normalized: StatusUpdateMsg = {
           type: "status_update",
           name: clientName,
@@ -1050,12 +1033,9 @@ export default function (pi: ExtensionAPI) {
       const name = hubClients.get(clientWs);
       if (!name) return; // already removed (e.g. via disconnect) — ignore stale event
       hubClients.delete(clientWs);
-      hubTerminalStatuses.delete(name);
-      hubTerminalContexts.delete(name);
-      hubTerminalCwds.delete(name);
       const list = terminalList();
-      connectedTerminals = list;
-      updateStatus();
+      // Self-delivery of this frame drops the departed terminal's metadata and
+      // refreshes the hub's own roster.
       const left: TerminalLeftMsg = {
         type: "terminal_left",
         name,
@@ -1208,6 +1188,11 @@ export default function (pi: ExtensionAPI) {
         if (disposed) return;
         role = "disconnected";
         connectedTerminals = [];
+        // Drop this connection's snapshots: a reconnect — or a promotion to hub —
+        // must not serve metadata from the network that just went away.
+        terminalStatuses.clear();
+        terminalCwds.clear();
+        terminalContexts.clear();
         updateStatus();
 
         if (!manuallyDisconnected) {
@@ -1320,13 +1305,11 @@ export default function (pi: ExtensionAPI) {
     // Runs before role is cleared, so peers still get a final status; more to the
     // point, the local gate record stays honest for the reconnect.
     syncCompactionStatus();
-    for (const id of [...pendingCompactResponses.keys()]) {
-      const pending = cleanupPendingCompact(id);
-      if (pending) {
-        pending.resolve(
-          textResult("Link disconnected", { error: "disconnected" }),
-        );
-      }
+    for (const [id, pending] of pendingCompactResponses) {
+      cleanupPendingCompact(id);
+      pending.resolve(
+        textResult("Link disconnected", { error: "disconnected" }),
+      );
     }
 
     // Close client connection
@@ -1348,11 +1331,8 @@ export default function (pi: ExtensionAPI) {
     role = "disconnected";
     connectedTerminals = [];
     terminalStatuses.clear();
-    hubTerminalStatuses.clear();
     terminalContexts.clear();
-    hubTerminalContexts.clear();
     terminalCwds.clear();
-    hubTerminalCwds.clear();
     lastPushedStatus = null;
     updateStatus();
 
@@ -1366,7 +1346,7 @@ export default function (pi: ExtensionAPI) {
     disconnect();
     ctx = undefined;
     // Full teardown: clear inbox and both timers. The compaction deadline runs to
-    // 180s, so it would otherwise outlive the extension and fire after teardown.
+    // 300s, so it would otherwise outlive the extension and fire after teardown.
     inbox.length = 0;
     if (flushTimer) {
       clearTimeout(flushTimer);
@@ -1458,7 +1438,6 @@ export default function (pi: ExtensionAPI) {
     // compaction, agent_start clears this flag, and delivery reopens into a
     // compaction that is still rebuilding context.
     setCompacting(false);
-    activeTools.clear(); // defensive: a run cannot begin owing tools from the last one
     if (statusIdentity(deriveStatus()) !== before) stateSince = Date.now();
     pushStatus();
   });
@@ -1552,13 +1531,21 @@ export default function (pi: ExtensionAPI) {
       : dim(preview);
   }
 
+  // The agent's and the user's view of the roster: same group only. Routing never
+  // uses this — the hub routes over hubClients; this is a lens over connectedTerminals.
+  function visibleTerminals(): string[] {
+    const group = groupOf(terminalName);
+    return connectedTerminals.filter((n) => groupOf(n) === group);
+  }
+
   // Shared "target not found" result for the send/compact tools.
   // Returns null when the target is present, so callers can `if (miss) return miss;`.
   function targetNotFound(to: string) {
-    return connectedTerminals.includes(to)
+    const visible = visibleTerminals();
+    return visible.includes(to)
       ? null
       : textResult(
-          `Terminal "${to}" not found. Connected: ${connectedTerminals.join(", ")}`,
+          `Terminal "${to}" not found. Connected: ${visible.join(", ")}`,
           { to, error: "not_found" },
         );
   }
@@ -1595,7 +1582,6 @@ export default function (pi: ExtensionAPI) {
     async execute(_toolCallId, params) {
       if (role === "disconnected") return notConnectedResult();
 
-      // Pre-validate target exists locally (best-effort, catches typos and definitely-absent names)
       if (params.to === terminalName) {
         return textResult("Cannot send to yourself", {
           to: params.to,
@@ -1648,8 +1634,7 @@ export default function (pi: ExtensionAPI) {
     label: "Link Compact",
     description: [
       "Ask another Pi terminal to compact its context window and wait until it finishes.",
-      "Returns once the target has compacted, so you can immediately send it new work.",
-      "A target declines unless Pi reports its session idle and no manual compaction holds its gate, so an active run, retry, automatic compaction, queued continuation or reported `compacting` all decline.",
+      "A target declines unless Pi reports its session idle and no compaction holds its gate, so an active run, retry, automatic compaction, queued continuation or reported `compacting` all decline.",
     ].join(" "),
     promptSnippet: "Ask another Pi terminal to compact its context window",
     parameters: Type.Object({
@@ -1672,7 +1657,7 @@ export default function (pi: ExtensionAPI) {
       if (role === "disconnected") return notConnectedResult();
 
       if (params.to === terminalName) {
-        return textResult("Cannot compact yourself - use /compact.", {
+        return textResult("Cannot compact yourself.", {
           to: params.to,
           error: "self_target",
         });
@@ -1759,8 +1744,8 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "link_list",
     label: "Link List",
-    description: "List all Pi terminals currently connected to the link.",
-    promptSnippet: "List connected Pi terminals on the link",
+    description: "List the Pi terminals in your group currently connected to the link.",
+    promptSnippet: "List connected Pi terminals in your group",
     parameters: Type.Object({}),
 
     async execute() {
@@ -1769,7 +1754,8 @@ export default function (pi: ExtensionAPI) {
       const statuses: Record<string, string> = {};
       const cwds: Record<string, string> = {};
       const contexts: Record<string, ContextSnapshot> = {};
-      const list = connectedTerminals
+      const visible = visibleTerminals();
+      const list = visible
         .map((name) => {
           const status = getStatusFor(name);
           const statusStr = status ? formatStatus(status) : "";
@@ -1788,7 +1774,7 @@ export default function (pi: ExtensionAPI) {
         .join("\n");
 
       return textResult(`Connected terminals:\n${list}`, {
-        terminals: connectedTerminals,
+        terminals: visible,
         statuses,
         cwds,
         contexts,
@@ -1842,7 +1828,8 @@ export default function (pi: ExtensionAPI) {
         _ctx.ui.notify("Link: not connected", "warning");
         return;
       }
-      const lines = connectedTerminals.map((name) => {
+      const visible = visibleTerminals();
+      const lines = visible.map((name) => {
         const status = getStatusFor(name);
         const statusStr = status ? formatStatus(status) : "";
         const cwd = getCwdFor(name);
@@ -1854,7 +1841,7 @@ export default function (pi: ExtensionAPI) {
         return line;
       });
       _ctx.ui.notify(
-        `Link: ${terminalName} (${role}) · ${connectedTerminals.length} online\n${lines.join("\n")}`,
+        `Link: ${terminalName} (${role}) · ${visible.length} online\n${lines.join("\n")}`,
         "info",
       );
     },
@@ -1896,7 +1883,6 @@ export default function (pi: ExtensionAPI) {
 
       // If we're the hub, check uniqueness before persisting
       if (role === "hub") {
-        // Check if name is taken by another terminal
         const takenByOther = Array.from(hubClients.values()).includes(newName);
         if (takenByOther) {
           _ctx.ui.notify(

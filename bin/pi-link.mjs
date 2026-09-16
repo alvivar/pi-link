@@ -340,8 +340,8 @@ function describeMode(mode) {
 // ── Parser ─────────────────────────────────────────────────────────────────
 //
 // Single sequential pass populates `state`; dispatcher reads it. Phases:
-//   1. Global flags (--global, --help, --version, --)
-//   2. Mode-selecting flags (--list, --resolve, --resolve=<name>)
+//   1. Global flags (--global, --help, --version, --json, --)
+//   2. Mode-selecting flags (--list, --status, --resolve, --resolve=<name>)
 //   3. Mode-specific extra-token rejection
 //   4. Launcher mode entry (mode null + bare positional)
 //   5. Launcher passthrough (mode launcher) with orphan-positional rejection
@@ -619,25 +619,26 @@ function failNoHub(port) {
   process.exit(2);
 }
 
-// The frozen contract, checked before any field is read. Anything else on the
-// port — a different service, a newer hub, a truncated proxy — must produce the
-// unsupported message, never a stack trace. Unknown extra fields stay allowed.
+// The fields the table reads, checked before any of them is read. A body that
+// lacks them or mistypes them — a different service, a truncated proxy, a newer
+// hub gone incompatible — must produce the unsupported message, never a stack
+// trace. Passing says the rows can be printed, nothing more: what the CLI never
+// prints it never checks, so the hub's payload invariants, and whether a hub sent
+// this at all, are not established here.
 function isContextField(c) {
   if (c === null) return true;
   if (!c || typeof c !== "object") return false;
   return (c.tokens === null || typeof c.tokens === "number") && typeof c.window === "number";
 }
 
-function isTerminalEntry(entry, index) {
+function isTerminalEntry(entry) {
   if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
   if (typeof entry.name !== "string") return false;
-  // Hub first, then clients — the ordering the renderer relies on.
-  if (entry.role !== (index === 0 ? "hub" : "client")) return false;
   // `status` and `sinceSeconds` are one optional pair: both or neither.
   //
   // The value is checked for shape, not vocabulary. `idle`/`thinking`/
   // `compacting`/`tool:<name>` are today's kinds, but that set has already grown
-  // once (`compacting` arrived after 0.3.0) and the CLI never branches on it — it
+  // once (`compacting`, in 0.3.0) and the CLI never branches on it — it
   // only prints it. Freezing the list here would make a newer hub's fifth kind
   // reject the whole payload, and only while some terminal happened to be in that
   // state: an intermittent failure telling the user to update. An empty string is
@@ -653,11 +654,7 @@ function isTerminalEntry(entry, index) {
 
 function isStatusPayload(payload) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
-  if (typeof payload.hub !== "string" || typeof payload.port !== "number") return false;
-  // A hub always reports itself, so an empty list is not this contract.
-  if (!Array.isArray(payload.terminals) || payload.terminals.length === 0) return false;
-  if (!payload.terminals.every(isTerminalEntry)) return false;
-  return payload.terminals[0].name === payload.hub;
+  return Array.isArray(payload.terminals) && payload.terminals.every((e) => isTerminalEntry(e));
 }
 
 async function runStatus(state) {
@@ -700,7 +697,6 @@ async function runStatus(state) {
     return;
   }
 
-  // Payload order is meaningful: the hub is first, then clients sorted by name.
   console.log(
     renderTable(payload.terminals, [
       { header: "NAME", get: (e) => e.name },
