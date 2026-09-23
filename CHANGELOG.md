@@ -6,6 +6,16 @@ This changelog is based on the git history from `2026-03-21` (initial commit) th
 
 ---
 
+## 0.5.1 — 2026-09-22
+
+### Fixed
+
+- **pi-link's tools are callable directly under Oh My Pi.** The three tools are registered with `loadMode: "essential"`, so harnesses that hide extension tools by default, such as Oh My Pi, list them with the other callable tools instead of behind a discovery path. Pi has no such field and ignores it.
+
+- **Peers see a terminal's context usage change after a model switch or tree navigation.** A terminal now republishes its context when its model changes or it moves to another branch of the session tree. Before, an idle terminal kept showing its previous figure until its next run.
+
+---
+
 ## 0.5.0 — 2026-09-16
 
 ### Added
