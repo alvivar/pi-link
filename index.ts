@@ -34,7 +34,10 @@ import { WebSocket, WebSocketServer } from "ws";
 const MIN_PI_VERSION = [0, 84, 2];
 
 const DEFAULT_PORT = 9900;
+// Backstop for the manual-compaction delivery gate; see setCompacting().
 const COMPACT_TIMEOUT_MS = 300_000;
+// How often a target holding a remote compaction request checks whether it can start.
+const COMPACT_WAIT_CHECK_MS = 500;
 const RECONNECT_DELAY_MS = 2000;
 // Bounds the HTTP Upgrade only. Without it `ws` waits forever, so a listener that
 // accepts the socket and never answers leaves the terminal offline with no retry.
@@ -107,7 +110,7 @@ interface CompactResponseMsg {
   from: string;
   to: string;
   ok: boolean;
-  reason?: string; // "busy" | "not_found" | "unsupported" | error text; absent on success
+  reason?: string; // a code compactReasonText() reads, or error text; absent on success
 }
 
 type LinkStatus =
@@ -142,6 +145,28 @@ function piVersionSupported(version: string): boolean {
     if (part !== MIN_PI_VERSION[i]) return part > MIN_PI_VERSION[i];
   }
   return true; // exactly the floor
+}
+
+/**
+ * The reason a `compact_response` gives, as the requester shows it. The wire keeps
+ * the codes; anything else, such as a runtime's own message, is shown as sent.
+ * Only targets on earlier versions answer `busy`: they declined instead of waiting.
+ */
+function compactReasonText(reason: string | undefined): string {
+  switch (reason) {
+    case "busy":
+      return "target busy";
+    case "not_found":
+      return "target not found";
+    case "unsupported":
+      return "compaction unavailable on target";
+    case "already_requested":
+      return "target already has a compaction request waiting or running";
+    case "tree_navigated":
+      return "target navigated its session tree while the request waited";
+    default:
+      return reason ?? "failed";
+  }
 }
 
 // keyText is empty when app.tools.expand has no binding, and the native hint would then
@@ -201,14 +226,14 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.registerFlag("link", {
-    description: "Connect to link on startup",
+    description: "Connect to the link on startup",
     type: "boolean",
     default: false,
   });
 
   pi.registerFlag("link-name", {
     description:
-      "Set the pi-link terminal name on startup (link identity only; does not affect session)",
+      "Set the link name on startup (link identity only; does not affect session)",
     type: "string",
   });
 
@@ -229,8 +254,12 @@ export default function (pi: ExtensionAPI) {
 
   // Status tracking (local truth)
   let agentRunning = false; // agent_start until agent_settled, not until agent_end
-  let compactRunning = false; // true while compacting for a remote request
-  let localCompacting = false; // true while compacting for a human /compact
+  let compactRunning = false; // gate held while running a remote compaction request
+  // The one remote compaction request this terminal holds, from receipt until it is
+  // answered. compactWaitTimer is set exactly while it waits to start.
+  let remoteCompact: CompactRequestMsg | null = null;
+  let compactWaitTimer: ReturnType<typeof setTimeout> | undefined;
+  let localCompacting = false; // gate set by Pi's manual-reason hook (human or remote)
   let compactDeadline: ReturnType<typeof setTimeout> | undefined;
   let wasCompactionGated = false; // gate state syncCompactionStatus() last acted on
   // toolCallId → toolName. Pi runs tools in parallel by default and both tool
@@ -267,21 +296,16 @@ export default function (pi: ExtensionAPI) {
   };
   let connectionAttempt: ConnectionAttempt | null = null;
 
-  // Pending compact responses (sender waiting for remote compaction to finish)
-  const pendingCompactResponses = new Map<
-    string,
-    {
-      resolve: (result: {
-        content: { type: "text"; text: string }[];
-        details: Record<string, unknown>;
-      }) => void;
-      targetName: string;
-      timeout: ReturnType<typeof setTimeout>;
-    }
-  >();
+  // link_compact requests this terminal sent and still tracks: request ID → requested
+  // target. The first outcome reported ends tracking; a response arriving after that
+  // is ignored. There is no deadline, because a target may wait indefinitely before
+  // it starts.
+  const pendingCompactResponses = new Map<string, string>();
 
-  // Inbox: fixed-window batching; every batch is delivered to the receiver's model
-  const inbox: { from: string; content: string }[] = [];
+  // Inbox: fixed-window batching; every batch is delivered to the receiver's model.
+  // Each entry is one rendered block: a received chat, or the outcome of a
+  // link_compact this terminal requested.
+  const inbox: string[] = [];
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
 
   // ── Helpers ──────────────────────────────────────────────────────────────
@@ -320,7 +344,7 @@ export default function (pi: ExtensionAPI) {
     // the same condition rather than two that can disagree. In reachable states it
     // competes only with "idle" — a compaction runs with no tool and no agent run —
     // but where it could overlap, the gate is the more actionable fact: work sent
-    // here waits, and link_compact declines.
+    // here waits, and so does a link_compact request.
     if (compactionGated()) return { kind: "compacting", since: stateSince };
     const tool = displayedTool();
     if (tool) return { kind: "tool", toolName: tool, since: stateSince };
@@ -488,9 +512,9 @@ export default function (pi: ExtensionAPI) {
     if (inbox.length === 0) return;
     if (!ctx) return;
 
-    // Compacting: hold everything and return WITHOUT rescheduling. setCompacting()
-    // drains on release, so polling a compaction that may run to the 300s ceiling
-    // would be ~1500 wakeups for no information.
+    // Compacting: hold everything and return WITHOUT rescheduling. releaseInbox()
+    // schedules delivery once both gates clear, so polling a hold that may last
+    // to the 300s ceiling would be ~1500 wakeups for no information.
     if (compactionGated()) return;
 
     // Select batch: up to BATCH_MAX_ITEMS, ~BATCH_MAX_CHARS total (soft cap —
@@ -498,8 +522,7 @@ export default function (pi: ExtensionAPI) {
     const batch: string[] = [];
     let totalChars = 0;
     for (let i = 0; i < inbox.length && batch.length < BATCH_MAX_ITEMS; i++) {
-      const item = inbox[i];
-      const text = `From "${item.from}":\n${item.content}`;
+      const text = inbox[i];
       if (batch.length > 0 && totalChars + text.length > BATCH_MAX_CHARS) break;
       batch.push(text);
       totalChars += text.length;
@@ -526,14 +549,16 @@ export default function (pi: ExtensionAPI) {
    * True exactly while delivery is deferred. Also what the terminal reports as its
    * status, so availability and delivery cannot disagree.
    *
-   * The two flags are not duplication. compactRunning is set synchronously by the
-   * compact_request handler before it calls ctx.compact(), covering the window
-   * before session_before_compact arrives; localCompacting covers a human /compact,
-   * which pi-link never initiates.
+   * The two flags are not duplication. compactRunning is set synchronously when a
+   * remote request starts, before ctx.compact() is called, covering the window
+   * before session_before_compact arrives. localCompacting is set by that hook for
+   * reason "manual", whether initiated by a human or a remote request that reaches
+   * the hook. It can survive a failed compaction, so a gate is not proof of a live
+   * compaction process.
    *
    * Both are load-bearing because Pi will not save us here: AgentSession.prompt()
-   * refuses to run during compaction, but sendCustomMessage reaches _runAgentPrompt
-   * directly and is not covered by that guard.
+   * refuses to run during compaction, but sendCustomMessage starts a run directly,
+   * bypassing prompt()'s guard.
    */
   function compactionGated() {
     return localCompacting || compactRunning;
@@ -560,14 +585,15 @@ export default function (pi: ExtensionAPI) {
   }
 
   /**
-   * Drain the inbox once NO gate remains. Call after clearing either flag.
+   * Schedule inbox delivery once NO gate remains. Call after clearing either flag.
    *
-   * Both gates must be checked together, because a remote compact sets both:
-   * ctx.compact() reaches Pi's compact(), which reports reason "manual", so
-   * session_before_compact sets localCompacting on top of compactRunning. Pi emits
-   * session_compact strictly before it resolves and fires onComplete, so releasing
-   * on either flag alone can arm a flush that finds the other flag still standing,
-   * returns without rescheduling, and strands the inbox with no release left.
+   * Both gates must be checked together, because a remote compact can set both:
+   * ctx.compact() reaches Pi's compact(), which reports reason "manual". If it reaches
+   * session_before_compact, that hook sets localCompacting on top of compactRunning;
+   * an early rejection may never reach the hook. Pi emits session_compact strictly
+   * before it resolves and fires onComplete, so releasing on either flag alone can
+   * arm a flush that finds the other flag still standing, returns without
+   * rescheduling, and strands the inbox with no release left.
    */
   function releaseInbox() {
     if (!localCompacting && !compactRunning && inbox.length > 0) {
@@ -576,7 +602,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   /**
-   * Gate and release inbox delivery around a local manual compaction.
+   * Gate and release inbox delivery for Pi's manual-reason compaction hook.
    *
    * The deadline is the only backstop pi-link uses. Pi 0.84.3+ reports failure and
    * abort through `session_compact_failed`, which pi-link does not handle (see
@@ -584,9 +610,6 @@ export default function (pi: ExtensionAPI) {
    * compaction-ending event it handles. The timer handle must be explicit
    * and cleared on every transition: a bare setTimeout outlives its own
    * compaction and would release a *later* compaction's flag.
-   *
-   * COMPACT_TIMEOUT_MS also bounds the remote-request wait. The two share a
-   * value, not a meaning: nothing here depends on their being equal.
    */
   function setCompacting(on: boolean) {
     localCompacting = on;
@@ -594,7 +617,7 @@ export default function (pi: ExtensionAPI) {
     compactDeadline = on
       ? setTimeout(() => setCompacting(false), COMPACT_TIMEOUT_MS)
       : undefined;
-    // Release drains; it never polls. Nothing else wakes a waiting inbox.
+    // Release schedules delivery; it never polls.
     if (!on) releaseInbox();
     syncCompactionStatus();
   }
@@ -611,12 +634,119 @@ export default function (pi: ExtensionAPI) {
 
   // ── Pending compact helpers ──────────────────────────────────────────────
 
-  function cleanupPendingCompact(requestId: string) {
-    const pending = pendingCompactResponses.get(requestId);
-    if (!pending) return null;
-    clearTimeout(pending.timeout);
+  /**
+   * End tracking of a link_compact request and report its outcome to this terminal's
+   * model through the inbox, so it is delivered like a received message. The line
+   * names the requested target, never a response's `from`: a hub-synthesized
+   * not_found comes from the hub. It carries no `From` header, because the outcome
+   * may come from the hub or from this terminal rather than from the target.
+   */
+  function reportCompact(requestId: string, outcome: string) {
+    const targetName = pendingCompactResponses.get(requestId);
+    if (targetName === undefined) return;
     pendingCompactResponses.delete(requestId);
-    return pending;
+    inbox.push(`link_compact "${targetName}" [${requestId}]: ${outcome}`);
+    scheduleFlush(FLUSH_DELAY_MS);
+  }
+
+  // ── Remote compaction requests (target side) ─────────────────────────────
+
+  function answerCompact(
+    request: CompactRequestMsg,
+    ok: boolean,
+    reason?: string,
+  ) {
+    routeMessage({
+      type: "compact_response",
+      id: request.id,
+      from: terminalName,
+      to: request.from,
+      ok,
+      reason,
+    });
+  }
+
+  /**
+   * Whether a remote request has to wait before it starts. Pi's idle state is the
+   * authority on whether this terminal is working; agentRunning is not: Pi may still
+   * retry, run an automatic compaction, or drain a queued continuation inside a run
+   * whose agent_end already fired, and compact() would abort that work. Pi 1.2's
+   * idle flag also covers its own compactions; at the 0.84.2 floor it covers only
+   * the agent run. Our gates extend beyond that: a manual compaction's
+   * localCompacting can remain after a failure, until its backstop.
+   */
+  function remoteCompactMustWait(context: ExtensionContext) {
+    return !context.isIdle() || compactionGated();
+  }
+
+  /**
+   * Start the held remote request once the terminal is free, checking again every
+   * COMPACT_WAIT_CHECK_MS until then. Polling, because no Pi event marks every
+   * moment the terminal becomes free: session_compact fires before Pi clears its
+   * compacting state, and a gate left by a failed compaction is released by its
+   * backstop or the next run. There is no deadline. Waiting raises no gate, so
+   * messages are still delivered, and one delivered into Pi's work keeps the
+   * terminal busy. One still in the inbox's batching window does not: it can lose
+   * to the start, and is then held until the compaction ends.
+   *
+   * Observing idle and then calling ctx.compact() is not atomic: work another
+   * extension or Pi itself starts in between can still be aborted by compact().
+   * A request served on arrival has always had the same window.
+   */
+  function startRemoteCompactWhenFree(
+    request: CompactRequestMsg,
+    context: ExtensionContext,
+  ) {
+    if (remoteCompactMustWait(context)) {
+      compactWaitTimer = setTimeout(
+        () => startRemoteCompactWhenFree(request, context),
+        COMPACT_WAIT_CHECK_MS,
+      );
+      return;
+    }
+    compactWaitTimer = undefined;
+    let finished = false;
+    const finish = (ok: boolean, reason?: string) => {
+      if (finished) return;
+      finished = true;
+      remoteCompact = null;
+      compactRunning = false;
+      releaseInbox(); // last gate may clear here, after session_compact already fired
+      // Only reverts status if localCompacting is also clear. A failure after
+      // session_before_compact leaves it standing, so the terminal keeps
+      // reporting the hold as compacting until the deadline, agent_start,
+      // or a later successful compaction.
+      syncCompactionStatus();
+      answerCompact(request, ok, reason);
+    };
+    compactRunning = true;
+    syncCompactionStatus();
+    // Pi reports the compaction's outcome through these callbacks once compact()
+    // settles; finish() clears compactRunning and answers the request, once. A
+    // failure is answered, not retried.
+    try {
+      context.compact({
+        customInstructions: request.instructions,
+        onComplete: () => finish(true),
+        onError: (e) =>
+          finish(false, e instanceof Error ? e.message : String(e)),
+      });
+    } catch (e) {
+      finish(false, e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  /**
+   * End the held remote request if it is still waiting, and return it. A running
+   * one is left to finish.
+   */
+  function dropWaitingRemoteCompact() {
+    if (compactWaitTimer === undefined) return null;
+    clearTimeout(compactWaitTimer);
+    compactWaitTimer = undefined;
+    const request = remoteCompact;
+    remoteCompact = null;
+    return request;
   }
 
   function allTerminalNames(): Set<string> {
@@ -718,9 +848,9 @@ export default function (pi: ExtensionAPI) {
 
   /**
    * Route a message to its destination. Works in both hub and client roles.
-   * Returns true if the message was delivered (or sent to the hub for routing).
-   * For the hub, this is authoritative. For clients, it's optimistic (hub may
-   * still reject via protocol-level error responses).
+   * Returns true after local handling or handoff to a connection, not a receipt ACK.
+   * The hub resolves the recipient locally; a client hands routing to the hub,
+   * which may still reject via protocol-level error responses.
    */
   function routeMessage(
     msg: ChatMsg | CompactRequestMsg | CompactResponseMsg,
@@ -754,7 +884,7 @@ export default function (pi: ExtensionAPI) {
 
       if (msg.from === terminalName) {
         // For compact_request, deliver the error response locally so the
-        // matching pending map resolves. For chat, skip — the tool result
+        // pending request reports it. For chat, skip — the tool result
         // (via return false) is sufficient; no extra UI toast.
         if (errorMsg.type === "compact_response") handleIncoming(errorMsg);
       } else {
@@ -798,7 +928,7 @@ export default function (pi: ExtensionAPI) {
         }
         updateStatus();
         notify(
-          `Joined link as "${terminalName}" (${visibleTerminals().length} online)`,
+          `Joined the link as "${terminalName}" (${visibleTerminals().length} online)`,
           "info",
         );
         pushStatus(true);
@@ -819,17 +949,10 @@ export default function (pi: ExtensionAPI) {
         terminalStatuses.delete(msg.name);
         terminalCwds.delete(msg.name);
         terminalContexts.delete(msg.name);
-        // Fail any pending compact request to the departed terminal
-        for (const [id, pending] of pendingCompactResponses) {
-          if (pending.targetName === msg.name) {
-            cleanupPendingCompact(id);
-            pending.resolve(
-              textResult(`Terminal "${msg.name}" disconnected`, {
-                to: msg.name,
-                error: "disconnected",
-              }),
-            );
-          }
+        // A departed target can no longer answer; whether it compacted is unknown.
+        for (const [id, targetName] of pendingCompactResponses) {
+          if (targetName === msg.name)
+            reportCompact(id, "left the link before answering; result unknown");
         }
         updateStatus();
         if (groupOf(msg.name) === groupOf(terminalName))
@@ -845,95 +968,41 @@ export default function (pi: ExtensionAPI) {
 
       // ── Chat message ──
       case "chat":
-        inbox.push({ from: msg.from, content: msg.content });
+        inbox.push(`From "${msg.from}":\n${msg.content}`);
         scheduleFlush(FLUSH_DELAY_MS);
         break;
 
       // ── Another terminal asks us to compact our context ──
       case "compact_request": {
-        const { id, from } = msg;
-        const respond = (ok: boolean, reason?: string) =>
-          routeMessage({
-            type: "compact_response",
-            id,
-            from: terminalName,
-            to: from,
-            ok,
-            reason,
-          });
-        // Answered before the busy question, and not through finish(): no capability
-        // and no context are refusals of a request we never took on, so nothing here
-        // owns the gate to clear or the inbox to release.
+        // Answered at once, without taking the request on: with no capability or no
+        // context there is nothing to wait for, and a second request is refused
+        // rather than queued, merged or allowed to replace the held one.
         if (!ctx || !ctx.compact) {
-          respond(false, "unsupported");
+          answerCompact(msg, false, "unsupported");
           break;
         }
-        // Pi's idle state is the authority on whether this terminal is working.
-        // agentRunning is not: Pi may still retry, run an automatic compaction, or
-        // drain a queued continuation inside a run whose agent_end already fired, and
-        // compact() would abort that work and compact the same branch a second time.
-        // compactionGated() adds what Pi's idle flag cannot cover — a manual
-        // compaction is not an agent run — and keeps declining while either gate
-        // stands, so we never touch a compaction we did not start.
-        if (!ctx.isIdle() || compactionGated()) {
-          respond(false, "busy");
+        if (remoteCompact) {
+          answerCompact(msg, false, "already_requested");
           break;
         }
-        let finished = false;
-        const finish = (ok: boolean, reason?: string) => {
-          if (finished) return;
-          finished = true;
-          compactRunning = false;
-          releaseInbox(); // last gate may clear here, after session_compact already fired
-          // Only reverts status if localCompacting is also clear. A failure after
-          // session_before_compact leaves it standing, so the terminal truthfully
-          // keeps reporting compacting until the deadline or agent_start.
-          syncCompactionStatus();
-          respond(ok, reason);
-        };
-        compactRunning = true;
-        syncCompactionStatus();
-        notify(`"${from}" requested compact`, "info");
-        // compact() aborts the current turn first, so the idle guard above
-        // keeps us from interrupting active work. Pi reports the compaction's
-        // outcome through these callbacks once compact() settles; finish() clears
-        // compactRunning and answers the request.
-        try {
-          ctx.compact({
-            customInstructions: msg.instructions,
-            onComplete: () => finish(true),
-            onError: (e) =>
-              finish(false, e instanceof Error ? e.message : String(e)),
-          });
-        } catch (e) {
-          finish(false, e instanceof Error ? e.message : String(e));
-        }
+        remoteCompact = msg;
+        notify(
+          remoteCompactMustWait(ctx)
+            ? `"${msg.from}" asked this terminal to compact; waiting until it is idle`
+            : `"${msg.from}" asked this terminal to compact`,
+          "info",
+        );
+        startRemoteCompactWhenFree(msg, ctx);
         break;
       }
 
       // ── Response to a compact we requested ──
-      case "compact_response": {
-        const pending = cleanupPendingCompact(msg.id);
-        if (pending) {
-          // Use the requested target, not msg.from: a hub-synthesized
-          // not_found response comes from the hub, not the target.
-          const target = pending.targetName;
-          if (msg.ok) {
-            pending.resolve(
-              textResult(`Compacted "${target}"`, { to: target }),
-            );
-          } else {
-            const reason = msg.reason ?? "failed";
-            pending.resolve(
-              textResult(`Compact on "${target}" not done: ${reason}`, {
-                to: target,
-                error: reason,
-              }),
-            );
-          }
-        }
+      case "compact_response":
+        reportCompact(
+          msg.id,
+          msg.ok ? "compacted" : `not done: ${compactReasonText(msg.reason)}`,
+        );
         break;
-      }
 
       case "error":
         notify(`Link: ${msg.message}`, "error");
@@ -1115,7 +1184,7 @@ export default function (pi: ExtensionAPI) {
       });
 
       server.on("error", () => {
-        // Port in use → someone else is the hub
+        // Listen failed; a port conflict is possible, but does not prove another hub.
         settle(false);
       });
 
@@ -1193,7 +1262,7 @@ export default function (pi: ExtensionAPI) {
         updateStatus();
 
         if (!manuallyDisconnected) {
-          notify("Disconnected from link hub", "warning");
+          notify("Disconnected from the link hub; reconnecting...", "warning");
           scheduleReconnect();
         }
       });
@@ -1243,7 +1312,8 @@ export default function (pi: ExtensionAPI) {
       if (await startHub(attempt)) return;
       if (!attemptIsCurrent(attempt)) return;
 
-      // Port busy but couldn't connect (rare race). Retry after delay.
+      // Establishment failed (e.g. a race, port conflict, or other listen failure).
+      // Retry after delay.
       scheduleReconnect();
     } finally {
       // Only while still the owner: an attempt cancelled mid-flight must not clear
@@ -1297,15 +1367,22 @@ export default function (pi: ExtensionAPI) {
     // This also clears the reconnect and startup timers.
     cancelConnectionAttempt();
 
-    // Clear link-owned remote compaction state; a local /compact survives disconnect.
+    // A remote request still waiting is dropped unanswered: the link it would answer
+    // over is closing, and its requester sees this terminal leave. A running one
+    // keeps its slot until it finishes. Clear the remote-request gate; the
+    // manual-reason hook's gate survives disconnect.
+    dropWaitingRemoteCompact();
     compactRunning = false;
     // Runs before role is cleared, so peers still get a final status; more to the
     // point, the local gate record stays honest for the reconnect.
     syncCompactionStatus();
-    for (const [id, pending] of pendingCompactResponses) {
-      cleanupPendingCompact(id);
-      pending.resolve(
-        textResult("Link disconnected", { error: "disconnected" }),
+    // A response could only arrive over the link being closed. The inbox survives
+    // disconnect, so these are delivered once no gate holds it; on shutdown,
+    // cleanup() clears them with the rest of the inbox.
+    for (const id of pendingCompactResponses.keys()) {
+      reportCompact(
+        id,
+        "link disconnected before an answer; result unknown, the target may still be compacting",
       );
     }
 
@@ -1333,7 +1410,7 @@ export default function (pi: ExtensionAPI) {
     lastPushedStatus = null;
     updateStatus();
 
-    // Inbox survives disconnect; flush unless a local /compact still gates it.
+    // Inbox survives disconnect; schedule delivery unless localCompacting still holds it.
     releaseInbox();
   }
 
@@ -1448,14 +1525,14 @@ export default function (pi: ExtensionAPI) {
     // There is deliberately no abort listener: event.signal firing is not an ending.
     // Pi passes that signal into the summarizer and its compaction controller lives
     // until the catch/finally, so releasing on abort would re-open delivery while the
-    // aborted compaction is still unwinding. A cancelled compaction is released by
-    // the user's next run (agent_start) or by the deadline.
+    // aborted compaction is still unwinding. A cancelled compaction's gate is released
+    // by the next run (agent_start), the deadline, or a later successful compaction.
     //
-    // Accepted gap: compact() aborts, authorises and prepares *before* emitting this
+    // Accepted gap: compact() aborts and prepares *before* emitting this
     // event, so a flush in that window can still start a turn against context about
     // to be rebuilt. The message itself survives — it is persisted and restored — so
     // only the turn is wasted. No heuristics to guess at the window. This is a
-    // manual-compaction limit only; remote compaction is already gated by
+    // human /compact limit only; remote compaction is already gated by
     // compactRunning, set before ctx.compact() is ever called.
     if (event.reason === "manual") setCompacting(true);
   });
@@ -1471,6 +1548,11 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_tree", async () => {
+    // A completed navigation moved the session off the branch a waiting request
+    // was made for. Only a waiting request is ended; a running one is left to
+    // finish and answer.
+    const waiting = dropWaitingRemoteCompact();
+    if (waiting) answerCompact(waiting, false, "tree_navigated");
     pushStatus(true); // context usage belongs to the active branch
   });
 
@@ -1518,7 +1600,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   function notConnectedResult() {
-    return textResult("Not connected to link", { error: "not_connected" });
+    return textResult("Not connected to the link", { error: "not_connected" });
   }
 
   // Collapsed one-line preview for the two outgoing tools. Whitespace is normalized so a
@@ -1575,8 +1657,10 @@ export default function (pi: ExtensionAPI) {
     name: "link_send",
     label: "Link Send",
     description: [
-      "Send a message to one other Pi terminal on the link.",
+      "Send a message to one other Pi terminal on the link, using its exact name from link_list.",
       "The message always acts: it steers a busy receiver at its next safe boundary, or starts a turn on an idle one.",
+      "To reply to a chat, use link_send to the sender in that chat's From block, even if it arrived while you were busy or alongside other chats in a batch; an ordinary reply stays local.",
+      "Replies and compaction outcomes start a turn if you are idle, so no polling or sleeping is needed to receive them; link_list reports status, not replies or outcomes.",
     ].join(" "),
     promptSnippet:
       "Send a message to another Pi terminal on the local link network",
@@ -1606,12 +1690,16 @@ export default function (pi: ExtensionAPI) {
 
       const target = `"${params.to}"`;
       if (!delivered) {
-        return textResult(`Failed to send to ${target}`, {
+        // The hub found no reachable target; a client's hub connection is not open.
+        const reason =
+          role === "hub" ? "target not found" : "connection to the link hub is not open";
+        return textResult(`Failed to send to ${target}: ${reason}`, {
           to: params.to,
           error: "not_delivered",
         });
       }
-      // Hub delivery is authoritative; client delivery is optimistic (hub routes)
+      // The hub hands off to the target connection; clients hand routing to the hub.
+      // Neither transport handoff confirms receipt.
       const verb = role === "hub" ? "Sent to" : "Sent to hub for delivery to";
       return textResult(`${verb} ${target}`, { to: params.to });
     },
@@ -1640,8 +1728,10 @@ export default function (pi: ExtensionAPI) {
     name: "link_compact",
     label: "Link Compact",
     description: [
-      "Ask another Pi terminal to compact its context window and wait until it finishes.",
-      "A target declines unless Pi reports its session idle and no compaction holds its gate, so an active run, retry, automatic compaction, queued continuation or reported `compacting` all decline.",
+      "Ask another Pi terminal to compact its context window.",
+      "Returns as soon as the request is sent, with its request ID; the outcome arrives later as a link notification naming the target and that ID.",
+      "The target waits, with no deadline, until Pi reports its session idle and no compaction holds its gate, then compacts; an active run, retry, automatic compaction, queued continuation or reported `compacting` delays it, and the outcome can take that long.",
+      "A target holds one request at a time and declines another while one waits or runs.",
     ].join(" "),
     promptSnippet: "Ask another Pi terminal to compact its context window",
     parameters: Type.Object({
@@ -1674,62 +1764,31 @@ export default function (pi: ExtensionAPI) {
       if (miss) return miss;
 
       const requestId = crypto.randomUUID();
+      // Tracked before routing, because the hub can synthesize a response in this
+      // same stack. From here on the request belongs to the extension, not to this
+      // call: the signal is not consulted again, and there is no remote cancel.
+      pendingCompactResponses.set(requestId, params.to);
 
-      return new Promise((resolve) => {
-        const timeout = setTimeout(() => {
-          const pending = cleanupPendingCompact(requestId);
-          if (pending) {
-            pending.resolve(
-              textResult(
-                `Compact request to "${params.to}" timed out after ${COMPACT_TIMEOUT_MS / 1000}s; the target may still be compacting.`,
-                { to: params.to, error: "timeout" },
-              ),
-            );
-          }
-        }, COMPACT_TIMEOUT_MS);
-
-        pendingCompactResponses.set(requestId, {
-          resolve,
-          targetName: params.to,
-          timeout,
-        });
-
-        signal?.addEventListener(
-          "abort",
-          () => {
-            const pending = cleanupPendingCompact(requestId);
-            if (pending) {
-              pending.resolve(
-                textResult("Compact request aborted", {
-                  to: params.to,
-                  error: "aborted",
-                }),
-              );
-            }
-          },
-          { once: true },
-        );
-
-        const delivered = routeMessage({
-          type: "compact_request",
-          id: requestId,
-          from: terminalName,
-          to: params.to,
-          instructions: params.instructions,
-        });
-
-        if (!delivered) {
-          const pending = cleanupPendingCompact(requestId);
-          if (pending) {
-            pending.resolve(
-              textResult(`Failed to request compact on "${params.to}"`, {
-                to: params.to,
-                error: "not_delivered",
-              }),
-            );
-          }
-        }
+      const delivered = routeMessage({
+        type: "compact_request",
+        id: requestId,
+        from: terminalName,
+        to: params.to,
+        instructions: params.instructions,
       });
+
+      // Still tracked means it was never handed on. No longer tracked means it was
+      // answered in this stack, and that outcome is already in the inbox.
+      if (!delivered && pendingCompactResponses.delete(requestId)) {
+        return textResult(
+          `Failed to request compact on "${params.to}": connection to the link hub is not open`,
+          { to: params.to, error: "not_delivered" },
+        );
+      }
+      return textResult(
+        `Compact request sent to "${params.to}" [${requestId}]; the result will arrive as a link notification.`,
+        { to: params.to, id: requestId },
+      );
     },
 
     renderCall(args, theme, context) {
@@ -1810,7 +1869,8 @@ export default function (pi: ExtensionAPI) {
 
       let text = theme.fg("toolTitle", theme.bold("link "));
       text += theme.fg("muted", `(${details.role}) `);
-      text += theme.fg("accent", `${details.terminals.length} terminal(s)`);
+      const count = details.terminals.length;
+      text += theme.fg("accent", `${count} terminal${count !== 1 ? "s" : ""}`);
       for (const name of details.terminals) {
         const isSelf = name === details.self;
         const status = details.statuses?.[name] ?? "";
@@ -1857,7 +1917,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("link-name", {
-    description: "Change link name. No arg = use session name",
+    description: "Change link name (without an argument, use the session name)",
     handler: async (args, _ctx) => {
       let newName = normalizeName(args) ?? "";
       if (!newName) {
@@ -1946,15 +2006,17 @@ export default function (pi: ExtensionAPI) {
     handler: async (_args, _ctx) => {
       pi.appendEntry("link-active", { active: false });
       manuallyDisconnected = true;
-      if (role === "disconnected") {
-        // Nothing is established, but a startup or reconnect attempt may still be
-        // dialing or binding; persisted intent has to win over it too.
-        cancelConnectionAttempt();
-        _ctx.ui.notify("Link disconnected", "info");
-        return;
-      }
+      // Also when nothing is established: a startup or reconnect attempt may still
+      // be dialing or binding, and compact requests sent before the hub was lost are
+      // still tracked. Persisted intent has to win over both.
+      const wasConnected = role !== "disconnected";
       disconnect();
-      _ctx.ui.notify("Disconnected from link", "info");
+      _ctx.ui.notify(
+        wasConnected
+          ? "Disconnected from the link; automatic reconnect disabled"
+          : "Already disconnected; automatic reconnect disabled",
+        "info",
+      );
     },
   });
 
@@ -1977,10 +2039,11 @@ export default function (pi: ExtensionAPI) {
   // ── Message renderer ─────────────────────────────────────────────────────
 
   pi.registerMessageRenderer("link", (message, options, theme) => {
-    const from =
-      (message.details as Record<string, unknown> | undefined)?.from ?? "link";
+    // Only messages restored from older sessions carry a sender in details.from. A
+    // current batch has none: its content already opens with `[Link: ...]`.
+    const from = (message.details as Record<string, unknown> | undefined)?.from;
     const text =
-      theme.fg("accent", `⚡ [${from}] `) +
+      theme.fg("accent", from === undefined ? "⚡ " : `⚡ [${from}] `) +
       theme.fg("text", String(message.content));
     const content = new Text(text, 0, 0);
     // The same panel Pi draws around extension messages by default: returning our own

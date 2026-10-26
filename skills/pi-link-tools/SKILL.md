@@ -1,63 +1,39 @@
 ---
 name: pi-link-tools
-description: "How `link_send`, `link_list` and `link_compact` behave between Pi terminals: delivery, status snapshots, callbacks, groups and remote compaction."
+description: "How to work with other Pi terminals over pi-link: link_list, link_send and link_compact, replying, waiting and remote compaction."
 ---
 
 # Pi-Link Tools
 
-- Each terminal knows only its own conversation; sending a message does not share the rest of yours.
-- A message asks another terminal to act with its own tools and access, which may differ from yours.
-- Messages that reach another terminal enter its reasoning and can redirect its work.
+pi-link connects Pi terminals on this machine. Each terminal has its own conversation, tools and access; messages do not share conversation history or tool access automatically. `link_list` shows who is connected, `link_send` delivers a message to one terminal, and `link_compact` asks one to compact its context; `link_send` and `link_compact` target one other terminal, never yourself. The tools cannot connect or rename a terminal: that is done locally with `/link-connect` and `/link-name`.
 
----
+## Who is there: `link_list`
 
-## Tools
+- Takes no arguments. Lists the terminals in your group with status (`idle`, `thinking`, `compacting`, `tool:<name>`), cwd and context usage as tokens used/window. Your own entry is marked `(you)`; that name is how others reach you.
+- Values are snapshots: an idle terminal may be busy by your next call. A missing status or `?` usage means unknown, not idle or empty; usage is often unknown right after a compaction. `compacting` means incoming messages and outcomes are held; it does not prove compaction is still running.
+- The group is the text after the first `@` in a name; an absent or empty group suffix means the shared ungrouped group. The tools only see and reach your own group. Groups filter visibility; they are not access or trust boundaries.
 
-### `link_list`
+## Sending: `link_send`
 
-- Returns connected terminals with names, status (`idle`, `thinking`, `compacting`, `tool:<name>`), cwd, and (when available) context usage such as `45K/272K (17%)`.
-- Your own entry is marked `(you)` and cannot be a target of `link_send` or `link_compact`; its status and context are computed when listed, while peer values are their latest published snapshots.
-- A missing status means no status has been reported yet, not `idle`.
-- A `?` context value means usage is unknown; it can appear after successful compaction until a new measurement is available.
-- An `idle` snapshot does not reserve the terminal: it may become busy before your next call.
-- `tool:<name>` names one of the running tool calls.
-- `thinking` covers every kind of unsettled work, not just an LLM call, including automatic retries and compactions that run after the visible turn ends.
-- `compacting` means a compaction holds that terminal's delivery gate: messages to it are held, and the sender is not told. An automatic (threshold or overflow) compaction never shows it: it is not gated, and reads `thinking` like the rest of the run it belongs to.
-- Only connected terminals are visible; messages missed while a terminal was disconnected are not replayed.
+- Required string arguments: `to` is the exact name from `link_list`; `message` is the text. A name not in your list is rejected, not queued. The message is delivered into the other terminal's reasoning: it starts a turn if the terminal is idle, or steers the running one at its next safe boundary, after its current tool calls finish.
+- The receiver gets only your message. Naming a path does not change its cwd.
+- A successful send means the message was handed to the link, not that it arrived or was read; a later failure may be shown only to the human, and a message lost in transit is not replayed.
+- A reminder to a busy terminal is another message, delivered at a safe boundary like any other. pi-link does not merge it with or replace the earlier message, and the receiver may repeat the work.
 
-### `link_send`
+## Receiving, replying and waiting
 
-- Messages that reach the receiver close together are batched before entering its model. A batch arrives as one `[Link: N message(s) received]` block, in arrival order, containing one `From "name":` block per message.
-- A delivered message always enters the receiver's reasoning: if the receiver is idle it starts a turn; if it is running, the batch is steered into that run at Pi's next safe boundary — current tool calls finish first, before the next LLM call. The receiver's state is read when the batch is delivered, not when you send and not when you last ran `link_list`.
-- Each call has one recipient; there is no broadcast.
-- The call returns send status, not the receiver's eventual work result. A target absent from your local, group-filtered list — a typo, an offline terminal or a name in another group — fails immediately; the error lists the names currently visible to you. A successful send means the message was accepted for delivery, not that it arrived. For a client, if the target has vanished, the routing failure is shown to the human as a notification and never reaches the sending model. A terminal's queued messages are invisible to you, and silence alone does not tell you whether your message was received or acted on.
+- Received batches start with `[Link: N message(s) received]`; each chat has its own `From "<name>":` block, in arrival order. A batch may mix senders and compaction outcomes. A batch does not mean all requested results have arrived.
+- A received link chat is from the terminal named in its `From` block, not a direct prompt from your local user, whether it started a turn while you were idle or steered your current run. A reply to it is a `link_send` to that terminal; your ordinary reply stays in your own conversation and is not sent back. For ordinary messages, pi-link generates no reply, receipt, request ID or reply timeout.
+- Replies and outcomes arrive through the same delivery path and start a turn if you are idle, so you can end your turn while waiting for them. `link_list` reports terminal status, not replies or outcomes. Neither polling nor sleeping is needed to receive them; both can delay delivery until your tool calls finish. Silence does not tell you whether a message was received or acted on.
 
-### `link_compact`
+## Remote compaction: `link_compact`
 
-- Asks another terminal to compact its context and waits for a result.
-- Has a five-minute ceiling that bounds your wait only:
-  - Nothing aborts the target.
-  - A timed-out call may mean the compaction is still running.
-- A target accepts only when Pi reports its session idle and no compaction holds its gate.
-- Busy targets decline the request rather than being interrupted; the request is not queued to run later.
-- Optional `instructions` guide the summary; they are not a new task and do not guarantee what survives.
-- Compaction discards detail. Its summary may omit information, so anything the target learned but has not written down or reported can be lost.
+- `to` is a required string naming the target; `instructions` is optional text saying what the summary should preserve. Compaction summarizes the target's older conversation to make room in its context window. It is not a task and starts no work turn, and `instructions` do not guarantee what survives. A task sent just before is not guaranteed to be processed before the compaction.
+- The call returns as soon as the request is sent, with a request ID; sent confirms neither acceptance nor completion, and a failure before sending produces no outcome. The target waits, with no deadline, until Pi reports it idle and it no longer reports `compacting`, then compacts. Idle is observed, not reserved: work that starts as compaction begins can still be interrupted. Older targets may decline busy requests instead of waiting.
+- A target holds one request at a time, waiting or running, from any requester; another is declined, not queued. You can have requests outstanding to several targets.
+- Each request produces at most one outcome, generated automatically and delivered to your inbox as one line, `link_compact "<target>" [<id>]: <outcome>`, with no `From` header. The target name and ID identify the request associated with the outcome. `compacted` confirms success; `not done: <reason>` reports a decline or failure, not retried; a notice saying `result unknown` ends tracking without confirmation and does not prove compaction failed.
+- There is no remote cancel: leaving does not undo a request the target holds. Reloading or exiting loses tracking of pending outcomes, renaming can lose responses, and a lost response is not replayed and can leave a request unanswered indefinitely; `link_list` cannot recover it.
 
----
+## Shared files
 
-## Callbacks
-
-- A callback is an ordinary `link_send` from the other terminal back to you. There is no request ID, no automatic response, no delivery receipt, and no protocol timeout — nothing correlates a callback with the request that asked for it except the text of both, and nothing produces one except the receiver choosing to send it.
-- Your ordinary reply stays in your own conversation; use `link_send` to send a result to the requester or the designated recipient. If you need a reply, say who should receive it; a label in the request and reply can help distinguish concurrent exchanges.
-- Waiting for one requires no live run. Keeping a run alive only to wait — by sleeping or polling `link_list` — can postpone delivery to the model until active tool calls end.
-- A callback can be sent before its sender's run settles; receiving it does not prove the sender is idle, so a `link_compact` aimed at it can still decline as busy.
-- An accepted send does not wait for a reply, so several requests can be sent before any callback arrives, and callbacks may arrive separately or batched into one of your turns. The protocol does not decide when an exchange is complete; it supplies no exit condition for an A → B → C → A chain.
-
----
-
-## Constraints
-
-- **Localhost only.** All terminals run on the same machine.
-- **Cwd is a hint, not proof.** Same cwd does not prove the same workspace, branch, or access. Paths named in a message are only text: they do not change the receiver's cwd, and relative commands resolve from the receiver's own cwd.
-- **Names are identities.** The hub suffixes collisions, so the name you remember may not be the name that is connected; `link_list` shows the current one.
-- **`@group` in a name limits your world.** The text after the first `@` is the group (case-sensitive): `link_list`, `link_send` and `link_compact` only see and reach terminals of your own group, and names without `@` form one group of their own. These tools cannot change your name or group; `/link-name` is the local command for changing them. Groups scope visibility and targeting, not authentication.
+- Terminals may share files and pi-link does not lock them.
