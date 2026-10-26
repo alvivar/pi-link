@@ -610,13 +610,15 @@ function formatTerminalStatus(entry) {
   return `${entry.status} (${formatAge(entry.sinceSeconds)})`;
 }
 
-function failUnsupported() {
-  console.error("Link hub does not support /status \u2014 update pi-link and restart terminals.");
+function failUnsupported(port) {
+  console.error(
+    `Unexpected response from :${port}/status; not a compatible pi-link hub. If it is one, update pi-link and restart terminals.`,
+  );
   process.exit(1);
 }
 
 function failNoHub(port) {
-  console.error(`No link hub running on :${port}.`);
+  console.error(`No link hub answered on :${port}.`);
   process.exit(2);
 }
 
@@ -673,7 +675,7 @@ async function runStatus(state) {
     failNoHub(port);
   }
 
-  if (!response.ok) failUnsupported();
+  if (!response.ok) failUnsupported(port);
 
   let body;
   try {
@@ -682,16 +684,16 @@ async function runStatus(state) {
     // A listener that sends headers and then stalls is still an unanswered
     // query, not an old hub: every timeout reports as "no hub".
     if (deadline.aborted) failNoHub(port);
-    failUnsupported();
+    failUnsupported(port);
   }
 
   let payload;
   try {
     payload = JSON.parse(body);
   } catch {
-    failUnsupported();
+    failUnsupported(port);
   }
-  if (!isStatusPayload(payload)) failUnsupported();
+  if (!isStatusPayload(payload)) failUnsupported(port);
 
   if (state.json) {
     process.stdout.write(body);
@@ -741,7 +743,7 @@ async function runLauncher(state) {
     piArgs.push("--session", matches[0].path);
   } else {
     if (!state.global) {
-      console.error(`No "${name}" found in this cwd. Use --global to search other cwds.`);
+      console.error(`No session named "${name}" found in this cwd. Use --global to search other cwds.`);
     }
     console.error("Starting new session.");
   }
