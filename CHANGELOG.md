@@ -6,6 +6,28 @@ This changelog is based on the git history from `2026-03-21` (initial commit) th
 
 ---
 
+## 0.6.1 — 2026-11-02
+
+### Fixed
+
+- **✗ for host errors in `link_send` and `link_compact` results.** When the host rejects a call before pi-link runs it, such as a failed argument validation, a blocked call or an abort, or when the call throws, the result row now shows ✗ instead of ✓. Pi marks these errors in the render context, and Oh My Pi in the result (from source reading; not tested under Oh My Pi). pi-link's own errors keep ✗ and successes keep ✓. Only the icon changes: results, the wire and the skill are unchanged.
+
+- **`pi-link <name>` rejects `--session-id`.** Pi's `--session-id` opens or creates a session by ID, so it passed through and either failed against the `--session` the wrapper adds or bypassed the lookup by name under the link name `<name>`. It now fails like the other session flags, with `Error: --session-id is managed by pi-link. Remove it.`
+
+- **`pi-link <name> --` no longer lets session and link-name flags through.** The wrapper drops its own `--` and passes the rest to Pi, so a flag after it, such as `pi-link foo -- --session-id abc`, still reached Pi as a flag and bypassed the session lookup or the link name. Tokens after `--` are now refused like the ones before it, in any position, including after Pi's own `--`, because the wrapper cannot tell where Pi's options end. A prompt that only begins with a flag name, as in `pi-link foo -- -- "--session-id explained"`, still passes.
+
+- **The CLI reads a `settings.json` that starts with a BOM.** `pi-link` ignored such a file with a warning and dropped its `sessionDir`, while Pi strips the BOM and uses it, so `--list`, `--resolve` and `pi-link <name>` could look in the default directory instead of Pi's. It now drops one leading BOM before parsing, as Pi does; a file that is still invalid JSON keeps the warning and is ignored.
+
+### Changed
+
+- **A target no longer answers `unsupported`.** The `compact_request` branch that declined with it when the target had no context or no compaction capability was unreachable on every supported host, and is removed. A requester still reads `unsupported` from a target on an earlier version as `not done: compaction unavailable on target`.
+
+- **Consistent CLI messages.** `pi-link --help`, `-h` and `pi-link` with no arguments now print the usage to stdout, as Pi does, so it can be piped or saved; exit codes are unchanged. The settings warning reads `Warning: Ignored <path>: <reason>` instead of `pi-link: ignored <path>: <reason>`. Prose after `Error: ` or `Warning: ` starts with a capital letter unless it begins with a literal token such as a flag, a quoted command or `pi-link`, as in `Error: Cannot combine --list and --resolve.`; sentences end with a period, and commands embedded in prose use double quotes, as in `"pi-link list" was removed. Use "pi-link --list".` The `--link-name` rejection now reads `Error: --link-name is not accepted by pi-link.` and points to `pi-link <name>` to open the named session on the link, or `pi --link-name <name>` to set only the link name.
+
+- **Consistent extension messages.** The `link_compact` self-target result reads `Cannot compact yourself`, without a period, like `link_send`'s `Cannot send to yourself`; `/link` when disconnected warns `Not connected to the link`, the text the tools return, instead of `Link: not connected`.
+
+---
+
 ## 0.6.0 — 2026-10-25
 
 ### Changed
