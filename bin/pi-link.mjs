@@ -39,9 +39,10 @@ function readSessionDirFromSettings(settingsPath) {
   if (!existsSync(settingsPath)) return undefined;
   let parsed;
   try {
-    parsed = JSON.parse(readFileSync(settingsPath, "utf-8"));
+    // Like Pi's stripBom, drop one leading BOM before parsing.
+    parsed = JSON.parse(readFileSync(settingsPath, "utf-8").replace(/^\uFEFF/, ""));
   } catch (err) {
-    console.error(`pi-link: ignored ${settingsPath}: ${err.message}`);
+    console.error(`Warning: Ignored ${settingsPath}: ${err.message}`);
     return undefined;
   }
   const value = parsed?.sessionDir;
@@ -193,7 +194,7 @@ async function scanSessions(dir, isCustom, scopeCwd) {
     entries = await readdir(dir, { withFileTypes: true });
   } catch (err) {
     if (err.code === "ENOENT") return [];
-    fail(`cannot read session directory: ${err.message}`);
+    fail(`Cannot read session directory: ${err.message}`);
   }
 
   const tasks = [];
@@ -278,13 +279,13 @@ function rejectManagedFlag(token) {
   const key = token.split("=")[0];
   if (key === "--link-name") {
     console.error(
-      "Error: --link-name is not accepted by the pi-link wrapper.\n" +
-      "  Use 'pi-link <name>' for combined link+session,\n" +
-      "  or run 'pi --link-name <name>' directly to set link name without session resolution.",
+      "Error: --link-name is not accepted by pi-link.\n" +
+      '  Use "pi-link <name>" to open the named session on the link,\n' +
+      '  or "pi --link-name <name>" to set only the link name.',
     );
     process.exit(1);
   }
-  if (["--session", "--continue", "-c", "--resume", "-r", "--fork", "--no-session", "--session-dir"].includes(key)) {
+  if (["--session", "--continue", "-c", "--resume", "-r", "--fork", "--no-session", "--session-dir", "--session-id"].includes(key)) {
     console.error(`Error: ${key} is managed by pi-link. Remove it.`);
     process.exit(1);
   }
@@ -306,15 +307,15 @@ function fail(msg) {
 }
 
 function printHelp() {
-  console.error("Usage: pi-link <name> [--global|-g] [pi flags...]");
-  console.error("       pi-link --list [--global|-g]");
-  console.error("       pi-link --status [--json]");
-  console.error("       pi-link --resolve <name> [--global|-g]");
-  console.error("       pi-link --version");
-  console.error("");
-  console.error("By default, name lookup is scoped to the current cwd.");
-  console.error("--global / -g widens the search to sessions in any cwd.");
-  console.error("--list reads saved sessions; --status asks the running hub who is connected.");
+  console.log("Usage: pi-link <name> [--global|-g] [pi flags...]");
+  console.log("       pi-link --list [--global|-g]");
+  console.log("       pi-link --status [--json]");
+  console.log("       pi-link --resolve <name> [--global|-g]");
+  console.log("       pi-link --version");
+  console.log("");
+  console.log("By default, name lookup is scoped to the current cwd.");
+  console.log("--global / -g widens the search to sessions in any cwd.");
+  console.log("--list reads saved sessions; --status asks the running hub who is connected.");
 }
 
 function printVersion() {
@@ -322,9 +323,9 @@ function printVersion() {
   try {
     pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf-8"));
   } catch (err) {
-    fail(`cannot read pi-link's package.json: ${err.message}`);
+    fail(`Cannot read pi-link's package.json: ${err.message}`);
   }
-  if (!pkg.version) fail("pi-link's package.json has no version");
+  if (!pkg.version) fail("pi-link's package.json has no version.");
   console.log(pkg.version);
 }
 
@@ -360,7 +361,7 @@ const state = {
 
 function setMode(mode) {
   if (state.mode !== null && state.mode !== mode) {
-    fail(`cannot combine ${describeMode(state.mode)} and ${describeMode(mode)}`);
+    fail(`Cannot combine ${describeMode(state.mode)} and ${describeMode(mode)}.`);
   }
   state.mode = mode;
 }
@@ -387,10 +388,13 @@ for (let i = 0; i < rawArgs.length; i++) {
   if (a === "--") {
     // `--` only meaningful in launcher mode (separates pi flags from positionals).
     if (state.mode !== "launcher") {
-      fail(`-- is only valid after a session name`);
+      fail(`-- is only valid after a session name.`);
     }
-    for (let j = i + 1; j < rawArgs.length; j++) {
-      state.piPassthrough.push(rawArgs[j]);
+    // The wrapper drops its own `--`, so the tokens after it still reach pi and can
+    // be options. Managed flags are refused in any position, as before the `--`.
+    for (const token of rawArgs.slice(i + 1)) {
+      rejectManagedFlag(token);
+      state.piPassthrough.push(token);
     }
     i = rawArgs.length;
     break;
@@ -417,13 +421,13 @@ for (let i = 0; i < rawArgs.length; i++) {
   }
   if (a.startsWith("--resolve=")) {
     setMode("resolve");
-    if (state.resolveName !== null) fail(`--resolve specified more than once`);
+    if (state.resolveName !== null) fail(`--resolve specified more than once.`);
     state.resolveName = a.slice("--resolve=".length);
     continue;
   }
   if (a === "--resolve") {
     setMode("resolve");
-    if (state.resolveName !== null) fail(`--resolve specified more than once`);
+    if (state.resolveName !== null) fail(`--resolve specified more than once.`);
     const next = rawArgs[i + 1];
     if (next === undefined || next.startsWith("-")) {
       fail(`--resolve requires a name argument.\n  Usage: pi-link --resolve <name> [--global|-g]`);
@@ -441,7 +445,7 @@ for (let i = 0; i < rawArgs.length; i++) {
     fail(`--version does not accept arguments: ${a}`);
   }
   if (state.mode === "list") {
-    fail(`--list does not accept argument: ${a}\n  Usage: pi-link --list [--global|-g]`);
+    fail(`--list does not accept arguments: ${a}\n  Usage: pi-link --list [--global|-g]`);
   }
   if (state.mode === "status") {
     fail(`--status does not accept arguments: ${a}\n  Usage: pi-link --status [--json]`);
@@ -458,7 +462,7 @@ for (let i = 0; i < rawArgs.length; i++) {
       fail(`Unknown argument: ${a}\n  Usage: pi-link <name> [--global|-g] [pi flags...]`);
     }
     if (a === "list" || a === "resolve") {
-      fail(`'pi-link ${a}' was removed. Use 'pi-link --${a}'.`);
+      fail(`"pi-link ${a}" was removed. Use "pi-link --${a}".`);
     }
     state.mode = "launcher";
     state.launcherName = a;
@@ -498,15 +502,15 @@ if (state.mode === "resolve") {
 // `--status` reads one running hub, so a cwd scope is meaningless rather than
 // merely unused: silently ignoring `-g` would imply a filter that cannot exist.
 if (state.mode === "status" && state.global) {
-  fail(`cannot combine --status and --global`);
+  fail(`Cannot combine --status and --global.`);
 }
 if (state.json && state.mode !== "status") {
-  fail(`--json is only valid with --status`);
+  fail(`--json is only valid with --status.`);
 }
 if (state.mode === "launcher") {
   const normalized = normalizeName(state.launcherName);
   if (!normalized) {
-    fail(`session name cannot be empty.\n  Usage: pi-link <name> [--global|-g] [pi flags...]`);
+    fail(`Session name cannot be empty.\n  Usage: pi-link <name> [--global|-g] [pi flags...]`);
   }
   state.launcherName = normalized;
 }
@@ -534,7 +538,7 @@ switch (state.mode) {
     await runLauncher(state);
     break;
   default:
-    fail(`internal error: unknown mode ${state.mode}`);
+    fail(`Internal error: unknown mode ${state.mode}`);
 }
 
 // ── Mode handlers ──────────────────────────────────────────────────────────

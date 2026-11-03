@@ -350,7 +350,7 @@ Lookup is **scoped to the current cwd by default**; pass `--global` (`-g`) to co
 - **One match in scope** → resumes that session
 - **No match in scope** → creates a new session in the current cwd, and advises `--global` without claiming a session exists elsewhere.
 - **Multiple matches in scope** → prints candidates to stderr, exits 1
-- **Conflicting flags** (`--session`, `--continue`, `--resume`, `--fork`, etc.) → rejected with an error
+- **Conflicting flags** (`--session`, `--session-id`, `--continue`, `--resume`, `--fork`, etc.) → rejected with an error
 
 ### Discovering sessions
 
