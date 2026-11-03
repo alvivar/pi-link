@@ -1637,14 +1637,26 @@ export default function (pi: ExtensionAPI) {
         );
   }
 
-  // Shared ✓/✗ result renderer for link_send and link_compact.
+  // Shared ✓/✗ result renderer for link_send and link_compact. Host errors
+  // (a failed validation, a blocked call, a throw) need not set details.error: Pi
+  // flags them in the render context, Oh My Pi in result.isError, where the fourth
+  // argument is the call's arguments instead.
   function renderIconResult(
-    result: { content: { type: string; text?: string }[]; details?: unknown },
+    result: {
+      content: { type: string; text?: string }[];
+      details?: unknown;
+      isError?: boolean;
+    },
     theme: { fg(role: string, text: string): string },
+    context?: { isError?: boolean },
   ) {
     const txt = result.content[0];
     const details = result.details as Record<string, unknown> | undefined;
-    const icon = details?.error
+    const failed =
+      context?.isError === true ||
+      result.isError === true ||
+      Boolean(details?.error);
+    const icon = failed
       ? theme.fg("error", "✗ ")
       : theme.fg("success", "✓ ");
     return new Text(icon + (txt?.type === "text" ? txt.text : ""), 0, 0);
@@ -1720,7 +1732,8 @@ export default function (pi: ExtensionAPI) {
       return new Text(text, 0, 0);
     },
 
-    renderResult: (result, _options, theme) => renderIconResult(result, theme),
+    renderResult: (result, _options, theme, context) =>
+      renderIconResult(result, theme, context),
   });
 
   pi.registerTool({
@@ -1804,7 +1817,8 @@ export default function (pi: ExtensionAPI) {
       return new Text(text, 0, 0);
     },
 
-    renderResult: (result, _options, theme) => renderIconResult(result, theme),
+    renderResult: (result, _options, theme, context) =>
+      renderIconResult(result, theme, context),
   });
 
   pi.registerTool({
