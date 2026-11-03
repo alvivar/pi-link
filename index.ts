@@ -150,7 +150,8 @@ function piVersionSupported(version: string): boolean {
 /**
  * The reason a `compact_response` gives, as the requester shows it. The wire keeps
  * the codes; anything else, such as a runtime's own message, is shown as sent.
- * Only targets on earlier versions answer `busy`: they declined instead of waiting.
+ * Only targets on earlier versions answer `busy` (they declined instead of waiting)
+ * or `unsupported`.
  */
 function compactReasonText(reason: string | undefined): string {
   switch (reason) {
@@ -974,25 +975,22 @@ export default function (pi: ExtensionAPI) {
 
       // ── Another terminal asks us to compact our context ──
       case "compact_request": {
-        // Answered at once, without taking the request on: with no capability or no
-        // context there is nothing to wait for, and a second request is refused
-        // rather than queued, merged or allowed to replace the held one.
-        if (!ctx || !ctx.compact) {
-          answerCompact(msg, false, "unsupported");
-          break;
-        }
+        // A second request is refused at once rather than queued, merged or
+        // allowed to replace the held one.
         if (remoteCompact) {
           answerCompact(msg, false, "already_requested");
           break;
         }
+        // Messages are handled only while isRuntimeLive(), which requires ctx.
+        const context = ctx!;
         remoteCompact = msg;
         notify(
-          remoteCompactMustWait(ctx)
+          remoteCompactMustWait(context)
             ? `"${msg.from}" asked this terminal to compact; waiting until it is idle`
             : `"${msg.from}" asked this terminal to compact`,
           "info",
         );
-        startRemoteCompactWhenFree(msg, ctx);
+        startRemoteCompactWhenFree(msg, context);
         break;
       }
 
@@ -1767,7 +1765,7 @@ export default function (pi: ExtensionAPI) {
       if (role === "disconnected") return notConnectedResult();
 
       if (params.to === terminalName) {
-        return textResult("Cannot compact yourself.", {
+        return textResult("Cannot compact yourself", {
           to: params.to,
           error: "self_target",
         });
@@ -1908,7 +1906,7 @@ export default function (pi: ExtensionAPI) {
     description: "Show link status",
     handler: async (_args, _ctx) => {
       if (role === "disconnected") {
-        _ctx.ui.notify("Link: not connected", "warning");
+        _ctx.ui.notify("Not connected to the link", "warning");
         return;
       }
       const visible = visibleTerminals();
