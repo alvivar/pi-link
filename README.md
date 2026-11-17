@@ -134,6 +134,8 @@ Terminal 1 calls `link_send` and returns immediately. The message enters Termina
 
 With two projects open, you may not want their terminals to see each other. Put a group after `@` in the name — `pi --link-name builder@frontend`, or `/link-name builder@frontend` from inside — and that terminal lists, messages and compacts only names ending in the same `@frontend`; a plain `builder` elsewhere no longer appears. The hub still serves everyone, and `pi-link --status` shows all groups. Full rule under [Configuration](#configuration).
 
+Type `/link-name builder@` and press Tab to complete the group. The choices include every group with a terminal currently connected, not just your own; the implicit group of plain names is omitted. Type part of the group after `@` to narrow the choices. Completion needs a link connection.
+
 ---
 
 ## LLM Tools
@@ -263,7 +265,7 @@ For the tool-result fields and implementation behind these behaviors, see [Remot
 | Command             | Purpose                                                                                                                  |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------ |
 | `/link`             | Show link status (name, role, online count, agent status, context usage, and cwd per terminal)                           |
-| `/link-name [name]` | Rename and save as this session's preferred link name. With no argument, adopts the Pi session name. Restored on resume. A name with `@` also sets your group. |
+| `/link-name [name]` | Rename and save as this session's preferred link name. With no argument, adopts the Pi session name. Restored on resume. A name with `@` also sets your group; while connected, Tab after `@` completes groups. |
 | `/link-connect`     | Connect to Pi Link (works anytime, with or without `--link`)                                                             |
 | `/link-disconnect`  | Disconnect from Pi Link and suppress auto-reconnect (overrides `--link`)                                                 |
 
