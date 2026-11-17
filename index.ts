@@ -250,6 +250,8 @@ export default function (pi: ExtensionAPI) {
   let ctx: ExtensionContext | undefined;
   let disposed = false;
   let manuallyDisconnected = false;
+  // One double-failure warning per outage; establishment or explicit disconnect resets it.
+  let connectionFailureReported = false;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let startupConnectTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -294,6 +296,7 @@ export default function (pi: ExtensionAPI) {
     socket: WebSocket | null; // dialing, not yet `ws`
     server: WebSocketServer | null; // binding, not yet `wss`
     httpServer: HttpServer | null; // binding, not yet `hubHttpServer`
+    listenError?: Error; // cause retained until runAttempt checks ownership
   };
   let connectionAttempt: ConnectionAttempt | null = null;
 
@@ -1141,12 +1144,13 @@ export default function (pi: ExtensionAPI) {
       const server = new WebSocketServer({ server: httpServer });
       attempt.server = server;
 
-      // The phase settles once. `error` and a pre-listen `close` both report the
-      // same failure, and closing a cancelled server reports it a third time.
+      // The phase settles once. A listen error keeps its cause on this attempt;
+      // cancellation can close the server without a listen error.
       let settled = false;
-      const settle = (established: boolean) => {
+      const settle = (established: boolean, listenError?: Error) => {
         if (settled) return;
         settled = true;
+        attempt.listenError = listenError;
         if (attempt.server === server) attempt.server = null;
         if (attempt.httpServer === httpServer) attempt.httpServer = null;
         resolve(established);
@@ -1168,6 +1172,7 @@ export default function (pi: ExtensionAPI) {
         if (pendingClientRename && preferredName) terminalName = preferredName;
         pendingClientRename = false;
         role = "hub";
+        connectionFailureReported = false;
         connectedTerminals = [terminalName];
         updateStatus();
         notify(
@@ -1187,9 +1192,10 @@ export default function (pi: ExtensionAPI) {
         hubHandleClient(clientWs);
       });
 
-      server.on("error", () => {
-        // Listen failed; a port conflict is possible, but does not prove another hub.
-        settle(false);
+      server.on("error", (error) => {
+        // A port conflict is possible, but does not prove another hub. runAttempt
+        // warns only after checking that this attempt still owns establishment.
+        settle(false, error);
       });
 
       server.on("close", () => {
@@ -1231,6 +1237,7 @@ export default function (pi: ExtensionAPI) {
         // socket that is neither.
         ws = socket;
         role = "client";
+        connectionFailureReported = false;
         // Register with preferred name if available, otherwise current name
         socket.send(
           JSON.stringify({
@@ -1312,12 +1319,20 @@ export default function (pi: ExtensionAPI) {
       if (await connectAsClient(attempt)) return;
       if (!attemptIsCurrent(attempt)) return;
 
-      // No hub found — become the hub
+      // Could not join — try becoming the hub
       if (await startHub(attempt)) return;
       if (!attemptIsCurrent(attempt)) return;
 
-      // Establishment failed (e.g. a race, port conflict, or other listen failure).
-      // Retry after delay.
+      // Report the first double failure of this outage, including an election race.
+      // Later retries stay quiet. A still-current failed bind reaches here through
+      // the server's error event, which populated the optional listenError field.
+      if (!connectionFailureReported && attempt.listenError) {
+        connectionFailureReported = true;
+        notify(
+          `Could neither join nor host the link on :${DEFAULT_PORT}. Retrying. Listen error: ${attempt.listenError.message}`,
+          "warning",
+        );
+      }
       scheduleReconnect();
     } finally {
       // Only while still the owner: an attempt cancelled mid-flight must not clear
@@ -2024,6 +2039,7 @@ export default function (pi: ExtensionAPI) {
     handler: async (_args, _ctx) => {
       pi.appendEntry("link-active", { active: false });
       manuallyDisconnected = true;
+      connectionFailureReported = false;
       // Also when nothing is established: a startup or reconnect attempt may still
       // be dialing or binding, and compact requests sent before the hub was lost are
       // still tracked. Persisted intent has to win over both.

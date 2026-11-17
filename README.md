@@ -483,7 +483,7 @@ Finally, `--status` and `--json` belong to the wrapper only until a session name
 
 ### Port 9900 is already in use
 
-If another process occupies port 9900, the terminal can't become the hub. It tries to connect as a client first, and that attempt fails within 5 seconds even against a listener that accepts the connection and never speaks WebSocket - so the terminal falls back to trying the hub role and then retries after 2-5 seconds, rather than sitting offline indefinitely. Free the port or modify `DEFAULT_PORT` in `index.ts` - see [Limitations](#limitations--design-decisions).
+If another process occupies port 9900, the terminal can't become the hub. It tries to connect as a client first, and that attempt fails within 5 seconds even against a listener that accepts the connection and never speaks WebSocket - so the terminal falls back to trying the hub role and then retries after 2-5 seconds instead of leaving a stalled handshake pending. If neither phase succeeds, one warning includes the listen error and says pi-link keeps retrying. Later failed retries stay quiet until a connection is established or you run `/link-disconnect`; a new double failure can then warn again. Free the port or modify `DEFAULT_PORT` in `index.ts` - see [Limitations](#limitations--design-decisions).
 
 ### `link_compact` has no outcome yet
 
@@ -568,7 +568,9 @@ The sequence is a simple fallback:
 
 1. Attempt to connect as a **client** to `127.0.0.1:9900`. The WebSocket opening handshake is bounded at **5 seconds**; a listener that accepts the connection but never completes the upgrade fails the attempt instead of holding it open.
 2. If connection fails → become the **hub** (start a WebSocket server on that port).
-3. If both fail (rare race condition) → retry after a randomized 2-5 second backoff.
+3. If both fail → warn once with the listen error and retry after a randomized 2-5 second backoff. A listen error does not prove another hub exists.
+
+If two terminals race to bind, the loser can show this warning before joining the winner on its retry. Cancelled or superseded attempts do not warn.
 
 Only **one attempt runs at a time**, across both steps. Startup, a retry and `/link-connect` arriving while an attempt is in flight all join that attempt rather than opening a second connection, so a terminal cannot register twice or leave a second socket behind.
 
