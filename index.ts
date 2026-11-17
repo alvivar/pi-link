@@ -27,15 +27,14 @@ import { WebSocket, WebSocketServer } from "ws";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-// Pi 0.84.2 is the floor: `agent_settled` and `ctx.isIdle()` are the whole basis of
-// the settled lifecycle and the remote-compaction guard below, and there is one code
-// path for them. Package installation does not check the host version, so an older
-// Pi installs pi-link successfully and must be refused at load.
-const MIN_PI_VERSION = [0, 84, 2];
+// Pi 0.85.0 is the floor: ctx.isIdle() must include Pi's own compactions so a
+// failed manual compaction's gate can clear when Pi reports idle. Installation
+// does not check the host version, so older Pi must be refused at load.
+const MIN_PI_VERSION = [0, 85, 0];
 
 const DEFAULT_PORT = 9900;
-// Backstop for the manual-compaction delivery gate; see setCompacting().
-const COMPACT_TIMEOUT_MS = 300_000;
+// How often a manual compaction's gate checks whether Pi has become idle.
+const COMPACT_IDLE_CHECK_MS = 500;
 // How often a target holding a remote compaction request checks whether it can start.
 const COMPACT_WAIT_CHECK_MS = 500;
 const RECONNECT_DELAY_MS = 2000;
@@ -222,7 +221,8 @@ export default function (pi: ExtensionAPI) {
   if (!piVersionSupported(PI_VERSION)) {
     throw new Error(
       `pi-link requires Pi >=${MIN_PI_VERSION.join(".")} in x.y.z format, without suffixes ` +
-        `(detected ${PI_VERSION || "unknown"}); pi-link 0.2.x supports Pi 0.74–0.84.1.`,
+        `(detected ${PI_VERSION || "unknown"}); pi-link 0.6.1 supports Pi 0.84.2–0.84.4; ` +
+        `pi-link 0.2.x supports Pi 0.74–0.84.1.`,
     );
   }
 
@@ -261,7 +261,7 @@ export default function (pi: ExtensionAPI) {
   let remoteCompact: CompactRequestMsg | null = null;
   let compactWaitTimer: ReturnType<typeof setTimeout> | undefined;
   let localCompacting = false; // gate set by Pi's manual-reason hook (human or remote)
-  let compactDeadline: ReturnType<typeof setTimeout> | undefined;
+  let compactIdleTimer: ReturnType<typeof setTimeout> | undefined;
   let wasCompactionGated = false; // gate state syncCompactionStatus() last acted on
   // toolCallId → toolName. Pi runs tools in parallel by default and both tool
   // events carry the call id, so one slot per call is the only way an end can clear
@@ -514,8 +514,8 @@ export default function (pi: ExtensionAPI) {
     if (!ctx) return;
 
     // Compacting: hold everything and return WITHOUT rescheduling. releaseInbox()
-    // schedules delivery once both gates clear, so polling a hold that may last
-    // to the 300s ceiling would be ~1500 wakeups for no information.
+    // schedules delivery once both gates clear; retrying this flush would learn
+    // nothing while either gate still holds.
     if (compactionGated()) return;
 
     // Select batch: up to BATCH_MAX_ITEMS, ~BATCH_MAX_CHARS total (soft cap —
@@ -605,22 +605,29 @@ export default function (pi: ExtensionAPI) {
   /**
    * Gate and release inbox delivery for Pi's manual-reason compaction hook.
    *
-   * The deadline is the only backstop pi-link uses. Pi 0.84.3+ reports failure and
-   * abort through `session_compact_failed`, which pi-link does not handle (see
-   * REPORT-session-compact-failed.md); `session_compact` is the only
-   * compaction-ending event it handles. The timer handle must be explicit
-   * and cleared on every transition: a bare setTimeout outlives its own
-   * compaction and would release a *later* compaction's flag.
+   * Success clears it through session_compact; after failure or cancellation,
+   * polling Pi's idle state supplies the missing ending. No elapsed-time limit
+   * releases a busy compaction. The timer survives disconnect, but is cancelled
+   * when the gate clears or the session shuts down.
+   *
+   * Do not register session_compact_failed: on Pi 1.5.2 even a no-op handler
+   * exposes a controller-ownership bug when two manual compactions overlap.
    */
   function setCompacting(on: boolean) {
     localCompacting = on;
-    clearTimeout(compactDeadline);
-    compactDeadline = on
-      ? setTimeout(() => setCompacting(false), COMPACT_TIMEOUT_MS)
+    clearTimeout(compactIdleTimer);
+    compactIdleTimer = on
+      ? setTimeout(checkLocalCompaction, COMPACT_IDLE_CHECK_MS)
       : undefined;
     // Release schedules delivery; it never polls.
     if (!on) releaseInbox();
     syncCompactionStatus();
+  }
+
+  function checkLocalCompaction() {
+    // The hook rejects disposed instances; cleanup cancels checks already armed.
+    if (ctx!.isIdle()) setCompacting(false);
+    else compactIdleTimer = setTimeout(checkLocalCompaction, COMPACT_IDLE_CHECK_MS);
   }
 
   // ── Connection intent ──────────────────────────────────────────────────
@@ -671,10 +678,9 @@ export default function (pi: ExtensionAPI) {
    * Whether a remote request has to wait before it starts. Pi's idle state is the
    * authority on whether this terminal is working; agentRunning is not: Pi may still
    * retry, run an automatic compaction, or drain a queued continuation inside a run
-   * whose agent_end already fired, and compact() would abort that work. Pi 1.2's
-   * idle flag also covers its own compactions; at the 0.84.2 floor it covers only
-   * the agent run. Our gates extend beyond that: a manual compaction's
-   * localCompacting can remain after a failure, until its backstop.
+   * whose agent_end already fired, and compact() would abort that work. Pi's idle
+   * flag also covers its own compactions. Our gates can outlast that work: a failed
+   * manual compaction's local gate remains until its next idle check.
    */
   function remoteCompactMustWait(context: ExtensionContext) {
     return !context.isIdle() || compactionGated();
@@ -684,8 +690,8 @@ export default function (pi: ExtensionAPI) {
    * Start the held remote request once the terminal is free, checking again every
    * COMPACT_WAIT_CHECK_MS until then. Polling, because no Pi event marks every
    * moment the terminal becomes free: session_compact fires before Pi clears its
-   * compacting state, and a gate left by a failed compaction is released by its
-   * backstop or the next run. There is no deadline. Waiting raises no gate, so
+   * compacting state, and a failed compaction's local gate clears on an idle check
+   * or the next run. There is no deadline. Waiting raises no gate, so
    * messages are still delivered, and one delivered into Pi's work keeps the
    * terminal busy. One still in the inbox's batching window does not: it can lose
    * to the start, and is then held until the compaction ends.
@@ -715,7 +721,7 @@ export default function (pi: ExtensionAPI) {
       releaseInbox(); // last gate may clear here, after session_compact already fired
       // Only reverts status if localCompacting is also clear. A failure after
       // session_before_compact leaves it standing, so the terminal keeps
-      // reporting the hold as compacting until the deadline, agent_start,
+      // reporting the hold as compacting until its next idle check, agent_start,
       // or a later successful compaction.
       syncCompactionStatus();
       answerCompact(request, ok, reason);
@@ -1367,13 +1373,10 @@ export default function (pi: ExtensionAPI) {
 
     // A remote request still waiting is dropped unanswered: the link it would answer
     // over is closing, and its requester sees this terminal leave. A running one
-    // keeps its slot until it finishes. Clear the remote-request gate; the
-    // manual-reason hook's gate survives disconnect.
+    // keeps its slot and gate until finish() handles the result, even before the
+    // manual-reason hook raises its own gate. Disconnect cancels neither compaction
+    // nor its inbox hold.
     dropWaitingRemoteCompact();
-    compactRunning = false;
-    // Runs before role is cleared, so peers still get a final status; more to the
-    // point, the local gate record stays honest for the reconnect.
-    syncCompactionStatus();
     // A response could only arrive over the link being closed. The inbox survives
     // disconnect, so these are delivered once no gate holds it; on shutdown,
     // cleanup() clears them with the rest of the inbox.
@@ -1408,7 +1411,7 @@ export default function (pi: ExtensionAPI) {
     lastPushedStatus = null;
     updateStatus();
 
-    // Inbox survives disconnect; schedule delivery unless localCompacting still holds it.
+    // Inbox survives disconnect; schedule delivery only when neither gate holds it.
     releaseInbox();
   }
 
@@ -1417,8 +1420,7 @@ export default function (pi: ExtensionAPI) {
     // disconnect() cancels the attempt in flight, including the startup timer.
     disconnect();
     ctx = undefined;
-    // Full teardown: clear inbox and both timers. The compaction deadline runs to
-    // 300s, so it would otherwise outlive the extension and fire after teardown.
+    // Full teardown: discard the inbox and cancel its flush and local idle check.
     inbox.length = 0;
     if (flushTimer) {
       clearTimeout(flushTimer);
@@ -1515,6 +1517,10 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_before_compact", async (event) => {
+    // Pi can emit this after shutdown if compact() was still awaiting abort().
+    // Do not raise a gate or arm a check against the cleared context.
+    if (disposed) return;
+
     // Manual only. Automatic (threshold/overflow) compaction runs inside the agent
     // run, so a delivered message takes Pi's steering arm and _runAutoCompaction
     // returns hasQueuedMessages() to drain it afterwards. Gating it would replace a
@@ -1524,7 +1530,7 @@ export default function (pi: ExtensionAPI) {
     // Pi passes that signal into the summarizer and its compaction controller lives
     // until the catch/finally, so releasing on abort would re-open delivery while the
     // aborted compaction is still unwinding. A cancelled compaction's gate is released
-    // by the next run (agent_start), the deadline, or a later successful compaction.
+    // when Pi reports idle, by the next run (agent_start), or by session_compact.
     //
     // Accepted gap: compact() aborts and prepares *before* emitting this
     // event, so a flush in that window can still start a turn against context about
